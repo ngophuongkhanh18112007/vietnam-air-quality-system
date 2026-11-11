@@ -1,3 +1,4 @@
+
 import pandas as pd
 import numpy as np
 
@@ -14,7 +15,9 @@ from config import (
 )
 
 
+# ============================================================
 # 1. CẤU HÌNH
+# ============================================================
 
 INPUT_FILE = DATA_DIR / "prediction_features.csv"
 
@@ -29,11 +32,31 @@ RISK_LABELS = {
     3: "Rất cao"
 }
 
+
+# ============================================================
 # 2. TẢI MÔ HÌNH CATBOOST
+# ============================================================
 
 def load_model():
 
     print("Đang tải mô hình từ Hugging Face...")
+
+    # Kiểm tra cấu hình, tuyệt đối không in HF_TOKEN
+    print("\nKIỂM TRA CẤU HÌNH:")
+    print("MODEL_REPO_ID:", MODEL_REPO_ID)
+    print("MODEL_FILENAME:", MODEL_FILENAME)
+    print("HF_TOKEN tồn tại:", bool(HF_TOKEN))
+
+    if not MODEL_REPO_ID:
+        raise ValueError("MODEL_REPO_ID đang bị trống!")
+
+    if not MODEL_FILENAME:
+        raise ValueError("MODEL_FILENAME đang bị trống!")
+
+    if not HF_TOKEN:
+        raise ValueError("HF_TOKEN chưa được cấu hình!")
+
+    print("\nĐang kết nối Model Repository...")
 
     model_path = hf_hub_download(
         repo_id=MODEL_REPO_ID,
@@ -42,11 +65,14 @@ def load_model():
         token=HF_TOKEN
     )
 
+    print("Tải file mô hình thành công!")
+    print("Đường dẫn file mô hình:", model_path)
+
     model = CatBoostClassifier()
 
     model.load_model(model_path)
 
-    print("Tải mô hình thành công!")
+    print("Đã load mô hình CatBoost!")
 
     # Kiểm tra số lượng features
     if len(model.feature_names_) != 33:
@@ -67,13 +93,16 @@ def load_model():
             f"Các lớp của mô hình không hợp lệ: {model.classes_}"
         )
 
-    print("Kiểm tra mô hình thành công!")
+    print("\nKiểm tra mô hình thành công!")
     print("Số features:", len(model.feature_names_))
     print("Các lớp:", model.classes_)
 
     return model
 
+
+# ============================================================
 # 3. ĐỌC DỮ LIỆU ĐẦU VÀO
+# ============================================================
 
 def load_prediction_data():
 
@@ -117,12 +146,16 @@ def load_prediction_data():
             "Dữ liệu đầu vào còn giá trị thiếu!"
         )
 
-    print("Đọc dữ liệu thành công!")
+    print("\nĐọc dữ liệu thành công!")
     print("Số dòng:", len(df))
+    print("Số địa điểm:", df["city"].nunique())
 
     return df
 
+
+# ============================================================
 # 4. THỰC HIỆN DỰ BÁO
+# ============================================================
 
 def predict_air_quality(model, df):
 
@@ -163,7 +196,10 @@ def predict_air_quality(model, df):
 
     return result
 
+
+# ============================================================
 # 5. LƯU KẾT QUẢ DỰ BÁO
+# ============================================================
 
 def save_predictions(result):
 
@@ -177,7 +213,9 @@ def save_predictions(result):
     print(OUTPUT_FILE)
 
 
+# ============================================================
 # 6. UPLOAD KẾT QUẢ LÊN HUGGING FACE
+# ============================================================
 
 def upload_predictions():
 
@@ -197,7 +235,9 @@ def upload_predictions():
     print("File:", REMOTE_OUTPUT_FILE)
 
 
+# ============================================================
 # 7. CHƯƠNG TRÌNH CHÍNH
+# ============================================================
 
 def main():
 
@@ -241,6 +281,7 @@ def main():
     )
 
     print("\nHOÀN THÀNH DỰ BÁO!")
+
 
 if __name__ == "__main__":
     main()
