@@ -1,3 +1,4 @@
+
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12,7 +13,9 @@ from provinces import CITIES_63
 from hf_storage import save_checkpoint, load_checkpoint
 
 
+# ============================================================
 # 1. CẤU HÌNH OPEN-METEO
+# ============================================================
 
 API_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
 
@@ -49,7 +52,9 @@ REQUIRED_COLUMNS = [
 ]
 
 
+# ============================================================
 # 2. TẠO KHOẢNG THỜI GIAN
+# ============================================================
 
 def get_date_range():
 
@@ -61,7 +66,9 @@ def get_date_range():
     return start_date.isoformat(), end_date.isoformat()
 
 
+# ============================================================
 # 3. TẠO MÃ CHECKPOINT CHO LẦN CHẠY
+# ============================================================
 
 def get_checkpoint_run_id(start_date, end_date):
 
@@ -72,12 +79,12 @@ def get_checkpoint_run_id(start_date, end_date):
     else:
         base_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # Cùng workflow run và cùng khoảng ngày sẽ dùng lại checkpoint.
-    # Khác khoảng ngày sẽ tạo checkpoint mới.
     return f"{base_id}_{start_date}_{end_date}"
 
 
+# ============================================================
 # 4. LẤY DỮ LIỆU MỘT ĐỊA ĐIỂM
+# ============================================================
 
 def fetch_city_data(city_id, city_info, start_date, end_date):
 
@@ -171,7 +178,9 @@ def fetch_city_data(city_id, city_info, start_date, end_date):
     )
 
 
+# ============================================================
 # 5. CHIA 63 ĐỊA ĐIỂM THÀNH CÁC NHÓM
+# ============================================================
 
 def create_groups():
 
@@ -188,7 +197,9 @@ def create_groups():
     return groups
 
 
+# ============================================================
 # 6. KIỂM TRA CHECKPOINT CỦA MỘT NHÓM
+# ============================================================
 
 def get_valid_checkpoint_cities(
     checkpoint_df,
@@ -233,6 +244,17 @@ def get_valid_checkpoint_cities(
         & (checkpoint_df["time"] < end)
     ]
 
+    # Tạo danh sách các mốc giờ dự kiến
+    expected_hours = set(
+        pd.date_range(
+            start=start,
+            end=end,
+            freq="h",
+            inclusive="left"
+        )
+    )
+
+    # Kiểm tra từng địa điểm trong nhóm
     for city_name in expected_names:
 
         city_df = checkpoint_df[
@@ -242,36 +264,29 @@ def get_valid_checkpoint_cities(
         if city_df.empty:
             continue
 
-        if city_df.empty:
-    continue
+        if city_df["time"].isna().any():
+            continue
 
-if city_df["time"].isna().any():
-    continue
+        # Loại bỏ các mốc giờ trùng lặp
+        city_df = city_df.drop_duplicates(
+            subset=["time"]
+        )
 
-city_df = city_df.drop_duplicates(
-    subset=["time"]
-)
+        actual_hours = set(city_df["time"])
 
-# Kiểm tra dữ liệu có đủ số mốc giờ dự kiến không
-expected_hours = (
-    pd.date_range(
-        start=start_date,
-        end=end_date,
-        freq="h",
-        inclusive="left"
-    )
-)
+        # Kiểm tra checkpoint có đủ mốc giờ không
+        if not expected_hours.issubset(actual_hours):
 
-actual_hours = set(city_df["time"])
+            print(
+                f"  Checkpoint chưa đầy đủ: {city_name}. "
+                "Sẽ thu thập lại địa điểm này."
+            )
 
-if not set(expected_hours).issubset(actual_hours):
-    print(
-        f"  Checkpoint chưa đầy đủ: {city_name}. "
-        "Sẽ thu thập lại địa điểm này."
-    )
-    continue
+            continue
 
-valid_data.append(city_df[REQUIRED_COLUMNS])
+        valid_data.append(
+            city_df[REQUIRED_COLUMNS]
+        )
 
         print(
             f"  Khôi phục checkpoint: {city_name} "
@@ -281,7 +296,9 @@ valid_data.append(city_df[REQUIRED_COLUMNS])
     return valid_data
 
 
+# ============================================================
 # 7. THU THẬP TỪNG NHÓM VÀ LƯU CHECKPOINT
+# ============================================================
 
 def fetch_one_group(
     group_cities,
@@ -293,9 +310,11 @@ def fetch_one_group(
 ):
 
     print("\n" + "=" * 60)
+
     print(
         f"BẮT ĐẦU NHÓM {group_number}/{total_groups}"
     )
+
     print("=" * 60)
 
     # Đọc checkpoint của nhóm hiện tại
@@ -311,12 +330,15 @@ def fetch_one_group(
         end_date
     )
 
-    # Xác định tỉnh chưa có dữ liệu checkpoint hợp lệ
+    # Xác định các địa điểm đã có dữ liệu hợp lệ
     completed_names = set()
 
     for df in group_data:
-        completed_names.update(df["city"].unique())
+        completed_names.update(
+            df["city"].unique()
+        )
 
+    # Xác định các địa điểm còn thiếu
     missing_cities = [
         (city_id, city_info)
         for city_id, city_info in group_cities
@@ -334,7 +356,7 @@ def fetch_one_group(
 
     failed_cities = []
 
-    # Chỉ lấy dữ liệu những tỉnh chưa có checkpoint
+    # Chỉ thu thập những địa điểm chưa có checkpoint hợp lệ
     if missing_cities:
 
         with ThreadPoolExecutor(
@@ -397,10 +419,12 @@ def fetch_one_group(
             checkpoint_run_id,
             group_number
         )
+
+    # Đếm số địa điểm thực sự có dữ liệu
     completed_count = len({
-    city
-    for df in group_data
-    for city in df["city"].unique()
+        city
+        for df in group_data
+        for city in df["city"].unique()
     })
 
     print(
@@ -412,7 +436,9 @@ def fetch_one_group(
     return group_data, failed_cities
 
 
+# ============================================================
 # 8. THU THẬP TOÀN BỘ 63 ĐỊA ĐIỂM
+# ============================================================
 
 def fetch_all_cities():
 
@@ -426,13 +452,16 @@ def fetch_all_cities():
     )
 
     print("=" * 60)
+
     print("BẮT ĐẦU THU THẬP DỮ LIỆU")
+
     print(f"Thời gian: {start_date} đến {end_date}")
     print(f"Tổng số địa điểm: {len(CITIES_63)}")
     print(f"Số nhóm: {len(groups)}")
     print(f"Số địa điểm mỗi nhóm: tối đa {GROUP_SIZE}")
     print(f"Số luồng song song: {MAX_WORKERS}")
     print(f"Checkpoint ID: {checkpoint_run_id}")
+
     print("=" * 60)
 
     all_data = []
@@ -456,10 +485,14 @@ def fetch_all_cities():
         all_data.extend(group_data)
         all_failed_cities.extend(failed_cities)
 
+    # ========================================================
     # 9. TỔNG HỢP VÀ KIỂM TRA
+    # ========================================================
 
     print("\n" + "=" * 60)
+
     print("TỔNG KẾT THU THẬP")
+
     print("=" * 60)
 
     if not all_data:
@@ -481,7 +514,9 @@ def fetch_all_cities():
         ["city", "time"]
     ).reset_index(drop=True)
 
-    actual_cities = set(final_df["city"].unique())
+    actual_cities = set(
+        final_df["city"].unique()
+    )
 
     expected_cities = {
         info["name"]
@@ -495,7 +530,9 @@ def fetch_all_cities():
         f"{len(actual_cities)}/63"
     )
 
-    print(f"Tổng số dòng: {len(final_df):,}")
+    print(
+        f"Tổng số dòng: {len(final_df):,}"
+    )
 
     if missing_cities:
 
@@ -510,7 +547,9 @@ def fetch_all_cities():
             "Hãy chạy lại workflow để tiếp tục."
         )
 
+    # ========================================================
     # 10. LƯU FILE CSV CHÍNH
+    # ========================================================
 
     DATA_DIR.mkdir(
         parents=True,
@@ -526,16 +565,21 @@ def fetch_all_cities():
     )
 
     print("\n" + "=" * 60)
+
     print("THU THẬP DỮ LIỆU THÀNH CÔNG!")
+
     print(f"Tổng số dòng: {len(final_df):,}")
     print(f"Số địa điểm: {len(actual_cities)}/63")
     print(f"Đường dẫn: {output_path}")
+
     print("=" * 60)
 
     return final_df
 
 
+# ============================================================
 # 11. CHẠY CHƯƠNG TRÌNH
+# ============================================================
 
 if __name__ == "__main__":
 
