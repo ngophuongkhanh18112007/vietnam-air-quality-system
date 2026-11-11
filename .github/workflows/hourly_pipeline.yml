@@ -1,3 +1,4 @@
+
 name: Hourly Air Quality Pipeline
 
 on:
@@ -9,6 +10,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: air-quality-hourly-pipeline
+  cancel-in-progress: false
 
 jobs:
   run-pipeline:
