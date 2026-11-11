@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import requests
 import pandas as pd
@@ -39,7 +40,6 @@ def get_date_range():
 
     return start_date.isoformat(), end_date.isoformat()
 
-
 # 3. LẤY DỮ LIỆU MỘT ĐỊA ĐIỂM
 
 def fetch_city_data(city_id, city_info, start_date, end_date):
@@ -59,16 +59,27 @@ def fetch_city_data(city_id, city_info, start_date, end_date):
             response = requests.get(
                 API_URL,
                 params=params,
-                timeout=REQUEST_TIMEOUT
+                timeout=90
             )
 
+            # API giới hạn số request
             if response.status_code == 429:
+
                 wait_time = int(
-                    response.headers.get("Retry-After", 10)
+                    response.headers.get("Retry-After", 15)
                 )
-                print(f"API giới hạn truy cập. Chờ {wait_time}s...")
-                time.sleep(wait_time)
-                continue
+
+                print(
+                    f"API giới hạn truy cập tại "
+                    f"{city_info['name']}. "
+                    f"Chờ {wait_time}s..."
+                )
+
+                if attempt < MAX_RETRIES:
+                    time.sleep(wait_time)
+                    continue
+
+                response.raise_for_status()
 
             response.raise_for_status()
 
@@ -110,7 +121,14 @@ def fetch_city_data(city_id, city_info, start_date, end_date):
             )
 
             if attempt < MAX_RETRIES:
-                time.sleep(5)
+
+                wait_time = 5 * (2 ** (attempt - 1))
+
+                print(
+                    f"Thử lại sau {wait_time} giây..."
+                )
+
+                time.sleep(wait_time)
 
     raise RuntimeError(
         f"Không thể lấy dữ liệu tại {city_info['name']}"
@@ -127,44 +145,69 @@ def fetch_all_cities():
     print("BẮT ĐẦU THU THẬP DỮ LIỆU")
     print(f"Thời gian: {start_date} đến {end_date}")
     print(f"Số địa điểm: {len(CITIES_63)}")
+    print("Số luồng xử lý song song: 5")
     print("=" * 60)
 
     all_data = []
     failed_cities = []
 
-    for index, (city_id, city_info) in enumerate(
-        CITIES_63.items(), start=1
-    ):
+    # Mỗi địa điểm có một nhiệm vụ riêng
+    with ThreadPoolExecutor(max_workers=5) as executor:
 
-        print(
-            f"[{index}/63] Đang lấy dữ liệu: "
-            f"{city_info['name']}"
-        )
+        futures = {}
 
-        try:
-            city_df = fetch_city_data(
+        for city_id, city_info in CITIES_63.items():
+
+            future = executor.submit(
+                fetch_city_data,
                 city_id,
                 city_info,
                 start_date,
                 end_date
             )
 
-            all_data.append(city_df)
+            futures[future] = city_info
+
+        # Nhận kết quả khi từng địa điểm hoàn thành
+        completed = 0
+
+        for future in as_completed(futures):
+
+            completed += 1
+
+            city_info = futures[future]
 
             print(
-                f"  Thành công: {len(city_df)} dòng"
+                f"\n[{completed}/{len(CITIES_63)}] "
+                f"Hoàn thành: {city_info['name']}"
             )
 
-        except Exception as error:
+            try:
 
-            failed_cities.append(
-                (city_info["name"], str(error))
-            )
+                city_df = future.result()
 
-            print(f"  THẤT BẠI: {error}")
+                all_data.append(city_df)
 
-        # Tránh gửi request quá nhanh
-        time.sleep(2.8)
+                print(
+                    f"  Thành công: {len(city_df)} dòng"
+                )
+
+            except Exception as error:
+
+                failed_cities.append(
+                    (city_info["name"], str(error))
+                )
+
+                print(f"  THẤT BẠI: {error}")
+
+    # Kiểm tra đủ 63 địa điểm
+    successful_cities = len(all_data)
+
+    print("\n" + "=" * 60)
+    print("KẾT QUẢ THU THẬP")
+    print(f"Thành công: {successful_cities}/63")
+    print(f"Thất bại: {len(failed_cities)}/63")
+    print("=" * 60)
 
     # Không tiếp tục nếu thiếu địa điểm
     if failed_cities:
@@ -179,24 +222,31 @@ def fetch_all_cities():
             "Không lưu dữ liệu chưa đầy đủ."
         )
 
-    # 5. GỘP DỮ LIỆU
-
+    # Ghép dữ liệu sau khi đủ 63 địa điểm
     final_df = pd.concat(
         all_data,
         ignore_index=True
     )
 
+    # Loại bỏ dữ liệu trùng
     final_df = final_df.drop_duplicates(
-        subset=["city", "time"],
-        keep="last"
+        subset=["city", "time"]
     )
 
     final_df = final_df.sort_values(
         ["city", "time"]
     ).reset_index(drop=True)
 
-    # 6. LƯU FILE
+    # Kiểm tra số lượng địa điểm
+    actual_cities = final_df["city"].nunique()
 
+    if actual_cities != 63:
+
+        raise RuntimeError(
+            f"Chỉ có {actual_cities}/63 địa điểm trong dữ liệu."
+        )
+
+    # Lưu dữ liệu khi đã kiểm tra thành công
     output_path = DATA_DIR / "latest_air_quality.csv"
 
     final_df.to_csv(
@@ -205,15 +255,13 @@ def fetch_all_cities():
         encoding="utf-8-sig"
     )
 
-    print("\n" + "=" * 60)
-    print("HOÀN THÀNH THU THẬP DỮ LIỆU")
-    print(f"Tổng số dòng: {len(final_df):,}")
-    print(f"Số địa điểm: {final_df['city'].nunique()}")
-    print(f"File lưu tại: {output_path}")
-    print("=" * 60)
+    print("\nTHU THẬP DỮ LIỆU THÀNH CÔNG!")
+    print(f"Tổng số dòng: {len(final_df)}")
+    print(f"Số địa điểm: {actual_cities}")
+    print(f"Đường dẫn: {output_path}")
 
     return final_df
 
-# 7. CHẠY CHƯƠNG TRÌNH
+# 5. CHẠY CHƯƠNG TRÌNH
 if __name__ == "__main__":
     fetch_all_cities()
