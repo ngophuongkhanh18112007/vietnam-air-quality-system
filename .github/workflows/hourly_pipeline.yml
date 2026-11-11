@@ -1,0 +1,47 @@
+name: Hourly Air Quality Pipeline
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+      timezone: "Asia/Ho_Chi_Minh"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
+      HF_MODEL_REPO: ${{ secrets.HF_MODEL_REPO }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Fetch air quality data
+        run: python src/fetch_data.py
+
+      - name: Upload raw data to Hugging Face
+        run: python src/hf_storage.py
+
+      - name: Create prediction features
+        run: python src/feature_engineering.py
+
+      - name: Predict air quality risk
+        run: python src/predict.py
