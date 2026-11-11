@@ -242,18 +242,36 @@ def get_valid_checkpoint_cities(
         if city_df.empty:
             continue
 
-        if city_df["time"].isna().any():
-            continue
-
-        if city_df["time"].duplicated().any():
-            city_df = city_df.drop_duplicates(
-                subset=["time"]
-            )
-
         if city_df.empty:
-            continue
+    continue
 
-        valid_data.append(city_df[REQUIRED_COLUMNS])
+if city_df["time"].isna().any():
+    continue
+
+city_df = city_df.drop_duplicates(
+    subset=["time"]
+)
+
+# Kiểm tra dữ liệu có đủ số mốc giờ dự kiến không
+expected_hours = (
+    pd.date_range(
+        start=start_date,
+        end=end_date,
+        freq="h",
+        inclusive="left"
+    )
+)
+
+actual_hours = set(city_df["time"])
+
+if not set(expected_hours).issubset(actual_hours):
+    print(
+        f"  Checkpoint chưa đầy đủ: {city_name}. "
+        "Sẽ thu thập lại địa điểm này."
+    )
+    continue
+
+valid_data.append(city_df[REQUIRED_COLUMNS])
 
         print(
             f"  Khôi phục checkpoint: {city_name} "
@@ -379,10 +397,15 @@ def fetch_one_group(
             checkpoint_run_id,
             group_number
         )
+    completed_count = len({
+    city
+    for df in group_data
+    for city in df["city"].unique()
+    })
 
     print(
         f"\nKẾT THÚC NHÓM {group_number}: "
-        f"{len(group_data)} phần dữ liệu thành công, "
+        f"{completed_count}/{len(group_cities)} địa điểm có dữ liệu, "
         f"{len(failed_cities)} địa điểm thất bại."
     )
 
