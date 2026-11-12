@@ -2,16 +2,19 @@
 name: CatBoost Model Retraining
 
 on:
-  # Chạy hằng ngày lúc 02:23 sáng giờ Việt Nam
-  # GitHub cron sử dụng UTC: 19:23 UTC = 02:23 UTC+7
   schedule:
     - cron: "23 19 * * *"
 
-  # Cho phép chạy thủ công
   workflow_dispatch:
     inputs:
+      check_only:
+        description: "Chỉ kiểm tra hệ thống, không huấn luyện"
+        required: true
+        default: true
+        type: boolean
+
       force:
-        description: "Bỏ qua kiểm tra chu kỳ 72 giờ và retrain ngay"
+        description: "Bỏ qua chu kỳ 72 giờ nếu chọn Train"
         required: false
         default: false
         type: boolean
@@ -26,8 +29,6 @@ concurrency:
 jobs:
   retrain:
     runs-on: ubuntu-latest
-
-    # Cho phép tối đa 6 giờ cho quá trình retraining
     timeout-minutes: 360
 
     env:
@@ -35,17 +36,12 @@ jobs:
       HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
       HF_MODEL_REPO: ${{ secrets.HF_MODEL_REPO }}
 
-    steps:
-      # ------------------------------------------------------
-      # 1. Checkout repository
-      # ------------------------------------------------------
+      CHECK_ONLY: ${{ inputs.check_only || 'false' }}
+      FORCE_RETRAIN: ${{ inputs.force || 'false' }}
 
+    steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      # ------------------------------------------------------
-      # 2. Setup Python
-      # ------------------------------------------------------
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -53,18 +49,10 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      # ------------------------------------------------------
-      # 3. Install dependencies
-      # ------------------------------------------------------
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
-      # ------------------------------------------------------
-      # 4. Check configuration
-      # ------------------------------------------------------
 
       - name: Check environment
         run: |
@@ -73,18 +61,17 @@ jobs:
           python -c "import os; assert os.getenv('HF_MODEL_REPO'), 'Missing HF_MODEL_REPO'"
           echo "Environment configuration: OK"
 
-      # ------------------------------------------------------
-      # 5. Run CatBoost retraining
-      # ------------------------------------------------------
-
-      - name: Run CatBoost retraining
-        env:
-          FORCE_RETRAIN: ${{ inputs.force || 'false' }}
+      - name: Run check-only mode
+        if: env.CHECK_ONLY == 'true'
         run: |
-          if [ "$FORCE_RETRAIN" = "true" ]; then
-            echo "Manual forced retraining..."
-            python src/retrain.py --force
-          else
-            echo "Checking 72-hour retraining interval..."
-            python src/retrain.py
-          fi
+          python src/retrain.py --check-only
+
+      - name: Run forced retraining
+        if: env.CHECK_ONLY != 'true' && env.FORCE_RETRAIN == 'true'
+        run: |
+          python src/retrain.py --force
+
+      - name: Run scheduled retraining
+        if: env.CHECK_ONLY != 'true' && env.FORCE_RETRAIN != 'true'
+        run: |
+          python src/retrain.py
