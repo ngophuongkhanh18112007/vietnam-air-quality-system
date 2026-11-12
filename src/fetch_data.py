@@ -30,14 +30,14 @@ POLLUTANTS = [
 
 LOOKBACK_DAYS = 3
 
-MAX_RETRIES = 3
-REQUEST_TIMEOUT = 90
+MAX_RETRIES = 5
+REQUEST_TIMEOUT = 120
 
 # Mỗi nhóm có 7 địa điểm
 GROUP_SIZE = 7
 
 # Mỗi nhóm tối đa 5 yêu cầu chạy song song
-MAX_WORKERS = 5
+MAX_WORKERS = 3
 
 REQUIRED_COLUMNS = [
     "time",
@@ -194,7 +194,7 @@ def fetch_city_data(
 
             if attempt < MAX_RETRIES:
 
-                wait_time = 5 * (2 ** (attempt - 1))
+                wait_time = 10 * (2 ** (attempt - 1))
 
                 print(
                     f"Thử lại sau {wait_time} giây..."
