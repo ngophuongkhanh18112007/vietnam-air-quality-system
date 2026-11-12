@@ -485,27 +485,35 @@ def create_risk_labels(df):
             skipna=False
         )
 
-        labels = np.select(
-            [
-                pollution_score <= 1,
-
-                (
-                    (pollution_score > 1)
-                    & (pollution_score <= 2)
-                ),
-
-                (
-                    (pollution_score > 2)
-                    & (pollution_score <= 3)
-                ),
-
-                pollution_score > 3
-            ],
-            [0, 1, 2, 3],
-            default=np.nan
+        # Khởi tạo nhãn dạng float để hỗ trợ NaN
+        labels = np.full(
+            len(pollution_score),
+            np.nan,
+            dtype=float
         )
 
-        # Write results back to original rows
+        valid = pollution_score.notna()
+
+        labels[
+            valid & (pollution_score <= 1)
+        ] = 0
+
+        labels[
+            valid
+            & (pollution_score > 1)
+            & (pollution_score <= 2)
+        ] = 1
+
+        labels[
+            valid
+            & (pollution_score > 2)
+            & (pollution_score <= 3)
+        ] = 2
+
+        labels[
+            valid & (pollution_score > 3)
+        ] = 3
+
         df.loc[
             group.index,
             "pollution_score"
@@ -524,7 +532,6 @@ def create_risk_labels(df):
     )
 
     return df
-
 
 # ============================================================
 # 5. CREATE 33 FEATURES AND TARGET t+3
@@ -672,35 +679,46 @@ def temporal_split(df):
 
     print("\nĐang chia dữ liệu theo thời gian...")
 
-    unique_times = np.sort(
-        df["target_time"].unique()
+    # Giữ lại 14 ngày gần nhất để đánh giá
+    HOLDOUT_DAYS = 14
+
+    # 7 ngày đầu làm Validation
+    # 7 ngày cuối làm Test
+    TEST_DAYS = 7
+
+    max_time = df["target_time"].max()
+
+    test_start = (
+        max_time - pd.Timedelta(days=TEST_DAYS)
     )
 
-    n_times = len(unique_times)
+    validation_start = (
+        max_time - pd.Timedelta(days=HOLDOUT_DAYS)
+    )
 
-    train_end = int(n_times * 0.80)
-    val_end = int(n_times * 0.90)
-
-    train_times = unique_times[:train_end]
-
-    val_times = unique_times[
-        train_end:val_end
-    ]
-
-    test_times = unique_times[
-        val_end:
-    ]
+    # --------------------------------------------------------
+    # TRAIN: Toàn bộ lịch sử trước 14 ngày cuối
+    # --------------------------------------------------------
 
     train_df = df[
-        df["target_time"].isin(train_times)
+        df["target_time"] < validation_start
     ].copy()
+
+    # --------------------------------------------------------
+    # VALIDATION: 7 ngày trước Test
+    # --------------------------------------------------------
 
     val_df = df[
-        df["target_time"].isin(val_times)
+        (df["target_time"] >= validation_start)
+        & (df["target_time"] < test_start)
     ].copy()
 
+    # --------------------------------------------------------
+    # TEST: 7 ngày gần nhất
+    # --------------------------------------------------------
+
     test_df = df[
-        df["target_time"].isin(test_times)
+        df["target_time"] >= test_start
     ].copy()
 
     print("\nTrain:", train_df.shape)
@@ -738,8 +756,21 @@ def temporal_split(df):
             "Một trong các tập dữ liệu bị rỗng."
         )
 
-    return train_df, val_df, test_df
+    # Đảm bảo Train có đủ 4 lớp
+    expected_classes = {0, 1, 2, 3}
 
+    actual_classes = set(
+        train_df["target"].unique()
+    )
+
+    if actual_classes != expected_classes:
+
+        raise ValueError(
+            "Train không có đủ 4 lớp.\n"
+            f"Các lớp hiện có: {actual_classes}"
+        )
+
+    return train_df, val_df, test_df
 
 # ============================================================
 # 7. EVALUATE MODEL
