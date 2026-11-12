@@ -60,11 +60,23 @@ def get_date_range():
 
     now = datetime.now(ZoneInfo(TIMEZONE))
 
+    # Chỉ lấy đến giờ đã hoàn tất gần nhất
+    # Ví dụ: 08:46 -> cutoff_time = 07:00
+    cutoff_time = now.replace(
+        minute=0,
+        second=0,
+        microsecond=0,
+        tzinfo=None
+    ) - timedelta(hours=1)
+
     end_date = now.date()
     start_date = end_date - timedelta(days=LOOKBACK_DAYS)
 
-    return start_date.isoformat(), end_date.isoformat()
-
+    return (
+        start_date.isoformat(),
+        end_date.isoformat(),
+        cutoff_time
+    )
 
 # ============================================================
 # 3. TẠO MÃ CHECKPOINT CHO LẦN CHẠY
@@ -86,7 +98,13 @@ def get_checkpoint_run_id(start_date, end_date):
 # 4. LẤY DỮ LIỆU MỘT ĐỊA ĐIỂM
 # ============================================================
 
-def fetch_city_data(city_id, city_info, start_date, end_date):
+def fetch_city_data(
+    city_id,
+    city_info,
+    start_date,
+    end_date,
+    cutoff_time
+):
 
     params = {
         "latitude": city_info["lat"],
@@ -151,6 +169,17 @@ def fetch_city_data(city_id, city_info, start_date, end_date):
 
             df["time"] = pd.to_datetime(df["time"])
 
+            # Chỉ giữ dữ liệu đến giờ hiện tại đã hoàn tất
+            df = df[
+                df["time"] <= cutoff_time
+            ].copy()
+
+            if df.empty:
+                raise ValueError(
+                    f"Không có dữ liệu đến {cutoff_time} "
+                    f"tại {city_info['name']}"
+                )
+
             df["city"] = city_info["name"]
             df["region"] = city_info["region"]
 
@@ -205,7 +234,8 @@ def get_valid_checkpoint_cities(
     checkpoint_df,
     group_cities,
     start_date,
-    end_date
+    end_date,
+    cutoff_time
 ):
 
     valid_data = []
@@ -237,24 +267,22 @@ def get_valid_checkpoint_cities(
     )
 
     start = pd.Timestamp(start_date)
-    end = pd.Timestamp(end_date) + pd.Timedelta(days=1)
 
+    # Chỉ kiểm tra dữ liệu đến cutoff_time
     checkpoint_df = checkpoint_df[
         (checkpoint_df["time"] >= start)
-        & (checkpoint_df["time"] < end)
+        & (checkpoint_df["time"] <= cutoff_time)
     ]
 
-    # Tạo danh sách các mốc giờ dự kiến
+    # Tạo danh sách các mốc giờ cần có
     expected_hours = set(
         pd.date_range(
             start=start,
-            end=end,
-            freq="h",
-            inclusive="left"
+            end=cutoff_time,
+            freq="h"
         )
     )
 
-    # Kiểm tra từng địa điểm trong nhóm
     for city_name in expected_names:
 
         city_df = checkpoint_df[
@@ -267,18 +295,16 @@ def get_valid_checkpoint_cities(
         if city_df["time"].isna().any():
             continue
 
-        # Loại bỏ các mốc giờ trùng lặp
         city_df = city_df.drop_duplicates(
             subset=["time"]
         )
 
         actual_hours = set(city_df["time"])
 
-        # Kiểm tra checkpoint có đủ mốc giờ không
         if not expected_hours.issubset(actual_hours):
 
             print(
-                f"  Checkpoint chưa đầy đủ: {city_name}. "
+                f"Checkpoint chưa đầy đủ: {city_name}. "
                 "Sẽ thu thập lại địa điểm này."
             )
 
@@ -295,10 +321,10 @@ def get_valid_checkpoint_cities(
 
     return valid_data
 
-
 # ============================================================
 # 7. THU THẬP TỪNG NHÓM VÀ LƯU CHECKPOINT
 # ============================================================
+
 
 def fetch_one_group(
     group_cities,
@@ -306,6 +332,7 @@ def fetch_one_group(
     total_groups,
     start_date,
     end_date,
+    cutoff_time,
     checkpoint_run_id
 ):
 
@@ -317,7 +344,6 @@ def fetch_one_group(
 
     print("=" * 60)
 
-    # Đọc checkpoint của nhóm hiện tại
     checkpoint_df = load_checkpoint(
         checkpoint_run_id,
         group_number
@@ -327,10 +353,10 @@ def fetch_one_group(
         checkpoint_df,
         group_cities,
         start_date,
-        end_date
+        end_date,
+        cutoff_time
     )
 
-    # Xác định các địa điểm đã có dữ liệu hợp lệ
     completed_names = set()
 
     for df in group_data:
@@ -338,7 +364,6 @@ def fetch_one_group(
             df["city"].unique()
         )
 
-    # Xác định các địa điểm còn thiếu
     missing_cities = [
         (city_id, city_info)
         for city_id, city_info in group_cities
@@ -356,7 +381,6 @@ def fetch_one_group(
 
     failed_cities = []
 
-    # Chỉ thu thập những địa điểm chưa có checkpoint hợp lệ
     if missing_cities:
 
         with ThreadPoolExecutor(
@@ -372,7 +396,8 @@ def fetch_one_group(
                     city_id,
                     city_info,
                     start_date,
-                    end_date
+                    end_date,
+                    cutoff_time
                 )
 
                 futures[future] = city_info
@@ -402,7 +427,6 @@ def fetch_one_group(
                         f"  THẤT BẠI: {city_info['name']}: {error}"
                     )
 
-    # Lưu tất cả dữ liệu thành công của nhóm
     if group_data:
 
         group_df = pd.concat(
@@ -420,7 +444,6 @@ def fetch_one_group(
             group_number
         )
 
-    # Đếm số địa điểm thực sự có dữ liệu
     completed_count = len({
         city
         for df in group_data
@@ -435,14 +458,13 @@ def fetch_one_group(
 
     return group_data, failed_cities
 
-
 # ============================================================
 # 8. THU THẬP TOÀN BỘ 63 ĐỊA ĐIỂM
 # ============================================================
 
 def fetch_all_cities():
 
-    start_date, end_date = get_date_range()
+    start_date, end_date, cutoff_time = get_date_range()
 
     groups = create_groups()
 
@@ -456,6 +478,7 @@ def fetch_all_cities():
     print("BẮT ĐẦU THU THẬP DỮ LIỆU")
 
     print(f"Thời gian: {start_date} đến {end_date}")
+    print(f"Giờ dữ liệu tối đa: {cutoff_time}")
     print(f"Tổng số địa điểm: {len(CITIES_63)}")
     print(f"Số nhóm: {len(groups)}")
     print(f"Số địa điểm mỗi nhóm: tối đa {GROUP_SIZE}")
@@ -479,6 +502,7 @@ def fetch_all_cities():
             len(groups),
             start_date,
             end_date,
+            cutoff_time,
             checkpoint_run_id
         )
 
@@ -512,6 +536,20 @@ def fetch_all_cities():
 
     final_df = final_df.sort_values(
         ["city", "time"]
+    ).reset_index(drop=True)
+
+    final_df["time"] = pd.to_datetime(final_df["time"])
+
+    final_df = final_df[
+       final_df["time"] <= cutoff_time
+    ].copy()
+
+    final_df = final_df.drop_duplicates(
+       subset=["city", "time"]
+    )
+
+    final_df = final_df.sort_values(
+       ["city", "time"]
     ).reset_index(drop=True)
 
     actual_cities = set(
