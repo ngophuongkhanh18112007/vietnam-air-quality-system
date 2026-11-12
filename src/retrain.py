@@ -143,9 +143,10 @@ def should_retrain(force=False):
     except EntryNotFoundError:
 
         print("Chưa có lịch sử retraining trước đó.")
-        print("Cho phép chạy lần đầu.")
+        print("Chưa cho phép tự động retrain.")
+        print("Cần chạy thủ công bằng --force cho lần đầu.")
 
-    return True
+    return False
 
 
 # ============================================================
