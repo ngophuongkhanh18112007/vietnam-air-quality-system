@@ -1,0 +1,90 @@
+
+name: CatBoost Model Retraining
+
+on:
+  # Chạy hằng ngày lúc 02:23 sáng giờ Việt Nam
+  # GitHub cron sử dụng UTC: 19:23 UTC = 02:23 UTC+7
+  schedule:
+    - cron: "23 19 * * *"
+
+  # Cho phép chạy thủ công
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Bỏ qua kiểm tra chu kỳ 72 giờ và retrain ngay"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: air-quality-model-retraining
+  cancel-in-progress: false
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+
+    # Cho phép tối đa 6 giờ cho quá trình retraining
+    timeout-minutes: 360
+
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
+      HF_MODEL_REPO: ${{ secrets.HF_MODEL_REPO }}
+
+    steps:
+      # ------------------------------------------------------
+      # 1. Checkout repository
+      # ------------------------------------------------------
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------
+      # 2. Setup Python
+      # ------------------------------------------------------
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # ------------------------------------------------------
+      # 3. Install dependencies
+      # ------------------------------------------------------
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ------------------------------------------------------
+      # 4. Check configuration
+      # ------------------------------------------------------
+
+      - name: Check environment
+        run: |
+          python -c "import os; assert os.getenv('HF_TOKEN'), 'Missing HF_TOKEN'"
+          python -c "import os; assert os.getenv('HF_DATASET_REPO'), 'Missing HF_DATASET_REPO'"
+          python -c "import os; assert os.getenv('HF_MODEL_REPO'), 'Missing HF_MODEL_REPO'"
+          echo "Environment configuration: OK"
+
+      # ------------------------------------------------------
+      # 5. Run CatBoost retraining
+      # ------------------------------------------------------
+
+      - name: Run CatBoost retraining
+        env:
+          FORCE_RETRAIN: ${{ inputs.force || 'false' }}
+        run: |
+          if [ "$FORCE_RETRAIN" = "true" ]; then
+            echo "Manual forced retraining..."
+            python src/retrain.py --force
+          else
+            echo "Checking 72-hour retraining interval..."
+            python src/retrain.py
+          fi
