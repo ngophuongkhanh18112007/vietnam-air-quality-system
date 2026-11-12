@@ -95,7 +95,6 @@ def should_retrain(force=False):
     print("\nKiểm tra thời điểm retraining gần nhất...")
 
     try:
-
         last_run_path = hf_hub_download(
             repo_id=MODEL_REPO_ID,
             filename=LAST_RUN_FILE,
@@ -103,12 +102,7 @@ def should_retrain(force=False):
             token=HF_TOKEN
         )
 
-        with open(
-            last_run_path,
-            "r",
-            encoding="utf-8"
-        ) as f:
-
+        with open(last_run_path, "r", encoding="utf-8") as f:
             last_run = json.load(f)
 
         last_time = datetime.fromisoformat(
@@ -116,38 +110,29 @@ def should_retrain(force=False):
         )
 
         if last_time.tzinfo is None:
-            last_time = last_time.replace(
-                tzinfo=timezone.utc
-            )
+            last_time = last_time.replace(tzinfo=timezone.utc)
 
         now = datetime.now(timezone.utc)
-
         elapsed = now - last_time
-
-        elapsed_hours = (
-            elapsed.total_seconds() / 3600
-        )
+        elapsed_hours = elapsed.total_seconds() / 3600
 
         print("Lần retraining gần nhất:", last_time)
         print(f"Đã trôi qua: {elapsed_hours:.2f} giờ")
 
-        if elapsed < timedelta(
-            hours=RETRAIN_INTERVAL_HOURS
-        ):
-
+        if elapsed < timedelta(hours=RETRAIN_INTERVAL_HOURS):
             print("Chưa đủ 72 giờ.")
             print("Bỏ qua lần chạy này.")
-
             return False
 
-    except EntryNotFoundError:
+        print("Đã đủ 72 giờ.")
+        print("Cho phép bắt đầu retraining.")
+        return True
 
+    except EntryNotFoundError:
         print("Chưa có lịch sử retraining trước đó.")
         print("Chưa cho phép tự động retrain.")
         print("Cần chạy thủ công bằng --force cho lần đầu.")
-
-    return False
-
+        return False
 
 # ============================================================
 # CHECK-ONLY: VERIFY ENVIRONMENT AND HUGGING FACE
