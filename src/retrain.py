@@ -149,6 +149,160 @@ def should_retrain(force=False):
 
 
 # ============================================================
+# CHECK-ONLY: VERIFY ENVIRONMENT AND HUGGING FACE
+# ============================================================
+
+def check_only():
+
+    print("\n" + "=" * 65)
+    print("KIỂM TRA HỆ THỐNG - KHÔNG HUẤN LUYỆN")
+    print("=" * 65)
+
+    # 1. Check environment
+    required_env = [
+        "HF_TOKEN",
+        "HF_DATASET_REPO",
+        "HF_MODEL_REPO"
+    ]
+
+    for key in required_env:
+        if not os.getenv(key):
+            raise ValueError(f"Thiếu biến môi trường: {key}")
+
+    print("\n[OK] Environment variables")
+
+    # 2. Check dataset repository
+    dataset_files = list_repo_files(
+        repo_id=DATASET_REPO_ID,
+        repo_type="dataset",
+        token=HF_TOKEN
+    )
+
+    if DATASET_FILENAME not in dataset_files:
+        raise FileNotFoundError(
+            f"Không tìm thấy dataset nền: {DATASET_FILENAME}"
+        )
+
+    monthly_files = sorted([
+        name for name in dataset_files
+        if name.startswith("historical/")
+        and name.endswith(".csv")
+    ])
+
+    if not monthly_files:
+        raise FileNotFoundError(
+            "Không tìm thấy file historical/*.csv"
+        )
+
+    print("\n[OK] Dataset repository")
+    print("Dataset nền:", DATASET_FILENAME)
+    print("Số file lịch sử:", len(monthly_files))
+    print("File lịch sử mới nhất:", monthly_files[-1])
+
+    # 3. Download and check dataset headers
+    baseline_path = hf_hub_download(
+        repo_id=DATASET_REPO_ID,
+        filename=DATASET_FILENAME,
+        repo_type="dataset",
+        token=HF_TOKEN
+    )
+
+    monthly_path = hf_hub_download(
+        repo_id=DATASET_REPO_ID,
+        filename=monthly_files[-1],
+        repo_type="dataset",
+        token=HF_TOKEN
+    )
+
+    for filename, path in [
+        (DATASET_FILENAME, baseline_path),
+        (monthly_files[-1], monthly_path)
+    ]:
+
+        columns = pd.read_csv(
+            path,
+            nrows=0
+        ).columns.tolist()
+
+        missing = [
+            col for col in RAW_COLUMNS
+            if col not in columns
+        ]
+
+        if missing:
+            raise ValueError(
+                f"{filename} thiếu cột: {missing}"
+            )
+
+        print(f"[OK] Cấu trúc cột: {filename}")
+
+    # 4. Check production model repository
+    model_files = list_repo_files(
+        repo_id=MODEL_REPO_ID,
+        repo_type="model",
+        token=HF_TOKEN
+    )
+
+    if MODEL_FILENAME not in model_files:
+        raise FileNotFoundError(
+            f"Không tìm thấy Production model: {MODEL_FILENAME}"
+        )
+
+    model_path = hf_hub_download(
+        repo_id=MODEL_REPO_ID,
+        filename=MODEL_FILENAME,
+        repo_type="model",
+        token=HF_TOKEN
+    )
+
+    production = CatBoostClassifier()
+    production.load_model(model_path)
+
+    if list(production.feature_names_) != FEATURE_COLUMNS:
+        raise ValueError(
+            "Production model không khớp FEATURE_COLUMNS."
+        )
+
+    if list(production.classes_) != [0, 1, 2, 3]:
+        raise ValueError(
+            "Production model không có đủ 4 lớp."
+        )
+
+    print("\n[OK] Production model")
+    print("Số features:", len(production.feature_names_))
+    print("Classes:", list(production.classes_))
+
+    # 5. Check retraining history
+    if LAST_RUN_FILE in model_files:
+
+        last_run_path = hf_hub_download(
+            repo_id=MODEL_REPO_ID,
+            filename=LAST_RUN_FILE,
+            repo_type="model",
+            token=HF_TOKEN
+        )
+
+        with open(
+            last_run_path,
+            "r",
+            encoding="utf-8"
+        ) as f:
+            last_run = json.load(f)
+
+        print("\n[INFO] Đã có lịch sử retraining:")
+        print("Run ID:", last_run.get("run_id"))
+        print("Completed at:", last_run.get("completed_at"))
+
+    else:
+        print("\n[INFO] Chưa có last_run.json.")
+        print("Đây sẽ là lần retraining đầu tiên.")
+
+    print("\n" + "=" * 65)
+    print("KIỂM TRA HOÀN TẤT - KHÔNG CÓ MODEL NÀO BỊ THAY ĐỔI")
+    print("=" * 65)
+
+
+# ============================================================
 # 3. DOWNLOAD AND MERGE HISTORICAL DATA
 # ============================================================
 
@@ -1385,6 +1539,12 @@ def main():
         help="Chạy ngay, bỏ qua chu kỳ 72 giờ."
     )
 
+    parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help="Chỉ kiểm tra hệ thống, không huấn luyện."
+    )
+
     args = parser.parse_args()
 
     print("=" * 65)
@@ -1394,9 +1554,12 @@ def main():
     if not HF_TOKEN:
         raise ValueError("Thiếu HF_TOKEN.")
 
-    if not should_retrain(
-        force=args.force
-    ):
+    # Check-only luôn được ưu tiên
+    if args.check_only:
+        check_only()
+        return
+
+    if not should_retrain(force=args.force):
         return
 
     # 1. Download and merge historical data
@@ -1418,7 +1581,6 @@ def main():
         test_df
     ) = temporal_split(training_df)
 
-    # Save test period for reporting
     test_start = test_df["target_time"].min()
     test_end = test_df["target_time"].max()
 
