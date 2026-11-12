@@ -25,61 +25,105 @@ POLLUTANTS = [
     "carbon_monoxide",
     "nitrogen_dioxide",
     "european_aqi",
-    "us_aqi"
+    "us_aqi",
+]
+
+REQUIRED_COLUMNS = [
+    "time",
+    *POLLUTANTS,
+    "city",
+    "region",
 ]
 
 LOOKBACK_DAYS = 3
 
+# Cấu hình retry và timeout
 MAX_RETRIES = 5
 REQUEST_TIMEOUT = 120
 
-# Mỗi nhóm có 7 địa điểm
+# Giảm số request đồng thời để hạn chế quá tải API
 GROUP_SIZE = 7
-
-# Mỗi nhóm tối đa 5 yêu cầu chạy song song
 MAX_WORKERS = 3
 
-REQUIRED_COLUMNS = [
-    "time",
-    "pm2_5",
-    "pm10",
-    "carbon_monoxide",
-    "nitrogen_dioxide",
-    "european_aqi",
-    "us_aqi",
-    "city",
-    "region"
-]
+# Thời gian chờ khi request gặp lỗi:
+# Lần 1: 10 giây
+# Lần 2: 20 giây
+# Lần 3: 40 giây
+# Lần 4: 80 giây
 
 
 # ============================================================
-# 2. TẠO KHOẢNG THỜI GIAN
+# 2. KIỂM TRA DANH SÁCH 63 ĐỊA ĐIỂM
+# ============================================================
+
+def validate_cities():
+
+    if len(CITIES_63) != 63:
+        raise ValueError(
+            f"Danh sách địa điểm không đủ 63. "
+            f"Hiện tại: {len(CITIES_63)}"
+        )
+
+    expected_regions = {
+        "Mien_Bac": 25,
+        "Mien_Trung": 19,
+        "Mien_Nam": 19,
+    }
+
+    actual_regions = {}
+
+    for city_id, city_info in CITIES_63.items():
+
+        required_keys = ["name", "region", "lat", "lon"]
+
+        for key in required_keys:
+            if key not in city_info:
+                raise ValueError(
+                    f"Địa điểm {city_id} thiếu thông tin {key}"
+                )
+
+        region = city_info["region"]
+
+        actual_regions[region] = (
+            actual_regions.get(region, 0) + 1
+        )
+
+    if actual_regions != expected_regions:
+        raise ValueError(
+            f"Phân bố vùng không đúng: {actual_regions}"
+        )
+
+    print("Đã kiểm tra danh sách 63 địa điểm thành công!")
+    print(f"Phân bố: {actual_regions}")
+
+
+# ============================================================
+# 3. XÁC ĐỊNH KHOẢNG THỜI GIAN THU THẬP
 # ============================================================
 
 def get_date_range():
 
     now = datetime.now(ZoneInfo(TIMEZONE))
 
-    # Chỉ lấy đến giờ đã hoàn tất gần nhất
-    # Ví dụ: 08:46 -> cutoff_time = 07:00
+    # Chỉ lấy đến giờ đã hoàn thành
     cutoff_time = now.replace(
         minute=0,
         second=0,
-        microsecond=0,
-        tzinfo=None
+        microsecond=0
     ) - timedelta(hours=1)
 
     end_date = now.date()
     start_date = end_date - timedelta(days=LOOKBACK_DAYS)
 
     return (
-        start_date.isoformat(),
-        end_date.isoformat(),
-        cutoff_time
+        start_date.strftime("%Y-%m-%d"),
+        end_date.strftime("%Y-%m-%d"),
+        cutoff_time.replace(tzinfo=None),
     )
 
+
 # ============================================================
-# 3. TẠO MÃ CHECKPOINT CHO LẦN CHẠY
+# 4. TẠO CHECKPOINT RUN ID
 # ============================================================
 
 def get_checkpoint_run_id(start_date, end_date):
@@ -95,7 +139,7 @@ def get_checkpoint_run_id(start_date, end_date):
 
 
 # ============================================================
-# 4. LẤY DỮ LIỆU MỘT ĐỊA ĐIỂM
+# 5. LẤY DỮ LIỆU TỪ MỘT ĐỊA ĐIỂM
 # ============================================================
 
 def fetch_city_data(
@@ -106,18 +150,26 @@ def fetch_city_data(
     cutoff_time
 ):
 
+    city_name = city_info["name"]
+
     params = {
         "latitude": city_info["lat"],
         "longitude": city_info["lon"],
         "hourly": ",".join(POLLUTANTS),
         "start_date": start_date,
         "end_date": end_date,
-        "timezone": TIMEZONE
+        "timezone": TIMEZONE,
     }
 
     for attempt in range(1, MAX_RETRIES + 1):
 
         try:
+
+            print(
+                f"[{city_name}] "
+                f"Đang lấy dữ liệu "
+                f"(lần thử {attempt}/{MAX_RETRIES})..."
+            )
 
             response = requests.get(
                 API_URL,
@@ -125,21 +177,36 @@ def fetch_city_data(
                 timeout=REQUEST_TIMEOUT
             )
 
+            # ------------------------------------------------
+            # XỬ LÝ HTTP 429 - API GIỚI HẠN REQUEST
+            # ------------------------------------------------
+
             if response.status_code == 429:
 
-                wait_time = int(
-                    response.headers.get("Retry-After", 15)
+                retry_after = response.headers.get(
+                    "Retry-After",
+                    "15"
                 )
 
-                print(
-                    f"API giới hạn truy cập tại "
-                    f"{city_info['name']}. "
-                    f"Chờ {wait_time}s..."
-                )
+                try:
+                    wait_time = int(retry_after)
+                except (TypeError, ValueError):
+                    wait_time = 15
 
                 if attempt < MAX_RETRIES:
+
+                    print(
+                        f"[{city_name}] API giới hạn truy cập. "
+                        f"Chờ {wait_time} giây rồi thử lại..."
+                    )
+
                     time.sleep(wait_time)
                     continue
+
+                raise RuntimeError(
+                    f"API tiếp tục giới hạn truy cập tại "
+                    f"{city_name} sau {MAX_RETRIES} lần thử."
+                )
 
             response.raise_for_status()
 
@@ -147,117 +214,119 @@ def fetch_city_data(
 
             if "hourly" not in result:
                 raise ValueError(
-                    f"API không trả về dữ liệu hourly: {city_id}"
+                    f"API không trả về dữ liệu hourly cho {city_name}"
                 )
 
-            df = pd.DataFrame(result["hourly"])
+            hourly_data = result["hourly"]
 
-            missing = [
-                col for col in ["time"] + POLLUTANTS
+            df = pd.DataFrame(hourly_data)
+
+            # Kiểm tra các cột cần thiết
+            missing_columns = [
+                col for col in ["time", *POLLUTANTS]
                 if col not in df.columns
             ]
 
-            if missing:
+            if missing_columns:
                 raise ValueError(
-                    f"Thiếu cột {missing} tại {city_id}"
+                    f"{city_name} thiếu các cột: {missing_columns}"
                 )
 
             if df.empty:
                 raise ValueError(
-                    f"API trả về dữ liệu trống tại {city_id}"
+                    f"Không có dữ liệu trả về cho {city_name}"
                 )
 
-            df["time"] = pd.to_datetime(df["time"])
+            # Chuyển thời gian
+            df["time"] = pd.to_datetime(
+                df["time"],
+                errors="coerce"
+            )
 
-            # Chỉ giữ dữ liệu đến giờ hiện tại đã hoàn tất
+            df = df.dropna(subset=["time"])
+
+            # Chỉ giữ dữ liệu đến giờ đã hoàn thành
             df = df[
                 df["time"] <= cutoff_time
             ].copy()
 
             if df.empty:
                 raise ValueError(
-                    f"Không có dữ liệu đến {cutoff_time} "
-                    f"tại {city_info['name']}"
+                    f"{city_name} không có dữ liệu "
+                    f"trước thời điểm {cutoff_time}"
                 )
 
-            df["city"] = city_info["name"]
+            # Gắn thông tin địa điểm
+            df["city"] = city_name
             df["region"] = city_info["region"]
 
-            return df[REQUIRED_COLUMNS]
-
-        except Exception as error:
+            # Sắp xếp và loại bỏ bản ghi trùng
+            df = (
+                df[REQUIRED_COLUMNS]
+                .drop_duplicates(subset=["time"])
+                .sort_values("time")
+                .reset_index(drop=True)
+            )
 
             print(
-                f"Lần thử {attempt}/{MAX_RETRIES} "
-                f"thất bại tại {city_info['name']}: {error}"
+                f"[{city_name}] Thu thập thành công: "
+                f"{len(df)} dòng dữ liệu."
             )
+
+            return df
+
+        except Exception as error:
 
             if attempt < MAX_RETRIES:
 
                 wait_time = 10 * (2 ** (attempt - 1))
 
                 print(
-                    f"Thử lại sau {wait_time} giây..."
+                    f"[{city_name}] Lỗi lần "
+                    f"{attempt}/{MAX_RETRIES}: {error}"
+                )
+
+                print(
+                    f"[{city_name}] Thử lại sau "
+                    f"{wait_time} giây..."
                 )
 
                 time.sleep(wait_time)
 
-    raise RuntimeError(
-        f"Không thể lấy dữ liệu tại {city_info['name']}"
-    )
+            else:
+
+                print(
+                    f"[{city_name}] THẤT BẠI sau "
+                    f"{MAX_RETRIES} lần thử: {error}"
+                )
+
+                raise RuntimeError(
+                    f"Không thể thu thập dữ liệu tại {city_name}"
+                ) from error
 
 
 # ============================================================
-# 5. CHIA 63 ĐỊA ĐIỂM THÀNH CÁC NHÓM
-# ============================================================
-
-def create_groups():
-
-    cities = list(CITIES_63.items())
-
-    groups = []
-
-    for i in range(0, len(cities), GROUP_SIZE):
-
-        groups.append(
-            cities[i:i + GROUP_SIZE]
-        )
-
-    return groups
-
-
-# ============================================================
-# 6. KIỂM TRA CHECKPOINT CỦA MỘT NHÓM
+# 6. KIỂM TRA CHECKPOINT ĐÃ LƯU
 # ============================================================
 
 def get_valid_checkpoint_cities(
     checkpoint_df,
     group_cities,
     start_date,
-    end_date,
     cutoff_time
 ):
 
-    valid_data = []
+    valid_cities = set()
 
-    expected_names = {
-        info["name"]
-        for _, info in group_cities
-    }
+    if checkpoint_df is None or checkpoint_df.empty:
+        return valid_cities
 
-    if checkpoint_df.empty:
-        return valid_data
-
-    missing_columns = [
-        col for col in REQUIRED_COLUMNS
-        if col not in checkpoint_df.columns
-    ]
-
-    if missing_columns:
-        print(
-            "Checkpoint thiếu cột, sẽ thu thập lại nhóm."
-        )
-        return valid_data
+    # Kiểm tra cột
+    if not set(REQUIRED_COLUMNS).issubset(
+        checkpoint_df.columns
+    ):
+        print("Checkpoint thiếu cột cần thiết. Sẽ thu thập lại.")
+        return valid_cities
 
     checkpoint_df = checkpoint_df.copy()
 
@@ -266,293 +335,314 @@ def get_valid_checkpoint_cities(
         errors="coerce"
     )
 
-    start = pd.Timestamp(start_date)
+    checkpoint_df = checkpoint_df.dropna(
+        subset=["time"]
+    )
 
-    # Chỉ kiểm tra dữ liệu đến cutoff_time
     checkpoint_df = checkpoint_df[
-        (checkpoint_df["time"] >= start)
+        (checkpoint_df["time"] >= pd.Timestamp(start_date))
         & (checkpoint_df["time"] <= cutoff_time)
     ]
 
-    # Tạo danh sách các mốc giờ cần có
-    expected_hours = set(
-        pd.date_range(
-            start=start,
-            end=cutoff_time,
-            freq="h"
-        )
+    # Các mốc giờ cần có
+    expected_hours = pd.date_range(
+        start=pd.Timestamp(start_date),
+        end=cutoff_time,
+        freq="h"
     )
 
-    for city_name in expected_names:
+    expected_set = set(expected_hours)
+
+    for city_id, city_info in group_cities:
+
+        city_name = city_info["name"]
 
         city_df = checkpoint_df[
             checkpoint_df["city"] == city_name
-        ].copy()
+        ]
 
         if city_df.empty:
             continue
 
-        if city_df["time"].isna().any():
-            continue
-
-        city_df = city_df.drop_duplicates(
-            subset=["time"]
+        actual_hours = set(
+            city_df["time"].drop_duplicates()
         )
 
-        actual_hours = set(city_df["time"])
+        # Chỉ sử dụng checkpoint nếu đủ toàn bộ mốc giờ
+        if expected_set.issubset(actual_hours):
 
-        if not expected_hours.issubset(actual_hours):
+            valid_cities.add(city_id)
 
             print(
-                f"Checkpoint chưa đầy đủ: {city_name}. "
-                "Sẽ thu thập lại địa điểm này."
+                f"[Checkpoint] {city_name}: "
+                f"Đã có đủ dữ liệu, bỏ qua thu thập."
             )
 
-            continue
+        else:
 
-        valid_data.append(
-            city_df[REQUIRED_COLUMNS]
-        )
+            missing_count = len(
+                expected_set - actual_hours
+            )
 
-        print(
-            f"  Khôi phục checkpoint: {city_name} "
-            f"({len(city_df)} dòng)"
-        )
+            print(
+                f"[Checkpoint] {city_name}: "
+                f"Thiếu {missing_count} mốc giờ. "
+                f"Sẽ thu thập lại."
+            )
 
-    return valid_data
+    return valid_cities
+
 
 # ============================================================
-# 7. THU THẬP TỪNG NHÓM VÀ LƯU CHECKPOINT
-# ============================================================
-
-
-def fetch_one_group(
-    group_cities,
-    group_number,
-    total_groups,
-    start_date,
-    end_date,
-    cutoff_time,
-    checkpoint_run_id
-):
-
-    print("\n" + "=" * 60)
-
-    print(
-        f"BẮT ĐẦU NHÓM {group_number}/{total_groups}"
-    )
-
-    print("=" * 60)
-
-    checkpoint_df = load_checkpoint(
-        checkpoint_run_id,
-        group_number
-    )
-
-    group_data = get_valid_checkpoint_cities(
-        checkpoint_df,
-        group_cities,
-        start_date,
-        end_date,
-        cutoff_time
-    )
-
-    completed_names = set()
-
-    for df in group_data:
-        completed_names.update(
-            df["city"].unique()
-        )
-
-    missing_cities = [
-        (city_id, city_info)
-        for city_id, city_info in group_cities
-        if city_info["name"] not in completed_names
-    ]
-
-    print(
-        f"\nNhóm {group_number}: "
-        f"Đã có {len(completed_names)}/{len(group_cities)} địa điểm."
-    )
-
-    print(
-        f"Cần thu thập thêm: {len(missing_cities)} địa điểm."
-    )
-
-    failed_cities = []
-
-    if missing_cities:
-
-        with ThreadPoolExecutor(
-            max_workers=MAX_WORKERS
-        ) as executor:
-
-            futures = {}
-
-            for city_id, city_info in missing_cities:
-
-                future = executor.submit(
-                    fetch_city_data,
-                    city_id,
-                    city_info,
-                    start_date,
-                    end_date,
-                    cutoff_time
-                )
-
-                futures[future] = city_info
-
-            for future in as_completed(futures):
-
-                city_info = futures[future]
-
-                try:
-
-                    city_df = future.result()
-
-                    group_data.append(city_df)
-
-                    print(
-                        f"  Thành công: {city_info['name']} "
-                        f"({len(city_df)} dòng)"
-                    )
-
-                except Exception as error:
-
-                    failed_cities.append(
-                        (city_info["name"], str(error))
-                    )
-
-                    print(
-                        f"  THẤT BẠI: {city_info['name']}: {error}"
-                    )
-
-    if group_data:
-
-        group_df = pd.concat(
-            group_data,
-            ignore_index=True
-        )
-
-        group_df = group_df.drop_duplicates(
-            subset=["city", "time"]
-        )
-
-        save_checkpoint(
-            group_df,
-            checkpoint_run_id,
-            group_number
-        )
-
-    completed_count = len({
-        city
-        for df in group_data
-        for city in df["city"].unique()
-    })
-
-    print(
-        f"\nKẾT THÚC NHÓM {group_number}: "
-        f"{completed_count}/{len(group_cities)} địa điểm có dữ liệu, "
-        f"{len(failed_cities)} địa điểm thất bại."
-    )
-
-    return group_data, failed_cities
-
-# ============================================================
-# 8. THU THẬP TOÀN BỘ 63 ĐỊA ĐIỂM
+# 7. THU THẬP DỮ LIỆU THEO TỪNG NHÓM
 # ============================================================
 
 def fetch_all_cities():
 
-    start_date, end_date, cutoff_time = get_date_range()
+    print("=" * 60)
+    print("BẮT ĐẦU THU THẬP DỮ LIỆU")
+    print("=" * 60)
 
-    groups = create_groups()
+    validate_cities()
+
+    start_date, end_date, cutoff_time = get_date_range()
 
     checkpoint_run_id = get_checkpoint_run_id(
         start_date,
         end_date
     )
 
-    print("=" * 60)
+    print(f"Thời gian bắt đầu: {start_date}")
+    print(f"Thời gian kết thúc: {end_date}")
+    print(f"Giờ dữ liệu cuối cùng: {cutoff_time}")
+    print(f"Checkpoint Run ID: {checkpoint_run_id}")
 
-    print("BẮT ĐẦU THU THẬP DỮ LIỆU")
-
-    print(f"Thời gian: {start_date} đến {end_date}")
-    print(f"Giờ dữ liệu tối đa: {cutoff_time}")
-    print(f"Tổng số địa điểm: {len(CITIES_63)}")
-    print(f"Số nhóm: {len(groups)}")
-    print(f"Số địa điểm mỗi nhóm: tối đa {GROUP_SIZE}")
-    print(f"Số luồng song song: {MAX_WORKERS}")
-    print(f"Checkpoint ID: {checkpoint_run_id}")
-
-    print("=" * 60)
-
-    all_data = []
+    all_city_data = []
     all_failed_cities = []
 
-    # Xử lý lần lượt từng nhóm
+    cities = list(CITIES_63.items())
+
+    # Chia 63 địa điểm thành từng nhóm
+    groups = [
+        cities[i:i + GROUP_SIZE]
+        for i in range(0, len(cities), GROUP_SIZE)
+    ]
+
+    print(f"Tổng số nhóm: {len(groups)}")
+
+    # --------------------------------------------------------
+    # XỬ LÝ TỪNG NHÓM
+    # --------------------------------------------------------
+
     for group_number, group_cities in enumerate(
         groups,
         start=1
     ):
 
-        group_data, failed_cities = fetch_one_group(
-            group_cities,
-            group_number,
-            len(groups),
-            start_date,
-            end_date,
-            cutoff_time,
-            checkpoint_run_id
+        print("\n" + "=" * 60)
+        print(
+            f"NHÓM {group_number}/{len(groups)} "
+            f"- {len(group_cities)} địa điểm"
+        )
+        print("=" * 60)
+
+        # Tải checkpoint của nhóm hiện tại
+        checkpoint_df = load_checkpoint(
+            checkpoint_run_id,
+            group_number
         )
 
-        all_data.extend(group_data)
-        all_failed_cities.extend(failed_cities)
+        if checkpoint_df is None:
+            checkpoint_df = pd.DataFrame(
+                columns=REQUIRED_COLUMNS
+            )
+
+        # Kiểm tra địa điểm nào đã có đủ dữ liệu
+        valid_checkpoint_cities = get_valid_checkpoint_cities(
+            checkpoint_df,
+            group_cities,
+            start_date,
+            cutoff_time
+        )
+
+        group_data = []
+
+        # Chỉ giữ dữ liệu checkpoint hợp lệ
+        if not checkpoint_df.empty:
+
+            valid_city_names = {
+                city_info["name"]
+                for city_id, city_info in group_cities
+                if city_id in valid_checkpoint_cities
+            }
+
+            valid_checkpoint_df = checkpoint_df[
+                checkpoint_df["city"].isin(
+                    valid_city_names
+                )
+            ].copy()
+
+            if not valid_checkpoint_df.empty:
+                group_data.append(valid_checkpoint_df)
+
+        # Các địa điểm cần thu thập lại
+        cities_to_fetch = [
+            (city_id, city_info)
+            for city_id, city_info in group_cities
+            if city_id not in valid_checkpoint_cities
+        ]
+
+        print(
+            f"Số địa điểm cần thu thập: "
+            f"{len(cities_to_fetch)}"
+        )
+
+        failed_in_group = []
+
+        # ----------------------------------------------------
+        # CHẠY SONG SONG VỚI SỐ WORKER GIỚI HẠN
+        # ----------------------------------------------------
+
+        if cities_to_fetch:
+
+            with ThreadPoolExecutor(
+                max_workers=MAX_WORKERS
+            ) as executor:
+
+                future_to_city = {
+                    executor.submit(
+                        fetch_city_data,
+                        city_id,
+                        city_info,
+                        start_date,
+                        end_date,
+                        cutoff_time
+                    ): (city_id, city_info)
+
+                    for city_id, city_info in cities_to_fetch
+                }
+
+                for future in as_completed(future_to_city):
+
+                    city_id, city_info = future_to_city[future]
+
+                    try:
+
+                        city_df = future.result()
+
+                        if city_df is not None and not city_df.empty:
+                            group_data.append(city_df)
+
+                    except Exception as error:
+
+                        city_name = city_info["name"]
+
+                        print(
+                            f"[NHÓM {group_number}] "
+                            f"Không thu thập được {city_name}: "
+                            f"{error}"
+                        )
+
+                        failed_in_group.append(
+                            (city_id, city_info)
+                        )
+
+                        all_failed_cities.append(
+                            city_name
+                        )
+
+        # ----------------------------------------------------
+        # GỘP VÀ LƯU CHECKPOINT
+        # ----------------------------------------------------
+
+        if group_data:
+
+            group_df = pd.concat(
+                group_data,
+                ignore_index=True
+            )
+
+            group_df["time"] = pd.to_datetime(
+                group_df["time"]
+            )
+
+            group_df = (
+                group_df
+                .drop_duplicates(
+                    subset=["city", "time"]
+                )
+                .sort_values(
+                    ["city", "time"]
+                )
+                .reset_index(drop=True)
+            )
+
+            save_checkpoint(
+                group_df,
+                checkpoint_run_id,
+                group_number
+            )
+
+            print(
+                f"[NHÓM {group_number}] "
+                f"Đã lưu checkpoint: "
+                f"{len(group_df)} dòng."
+            )
+
+            all_city_data.append(group_df)
+
+        else:
+
+            print(
+                f"[NHÓM {group_number}] "
+                f"Không có dữ liệu để lưu checkpoint."
+            )
+
+        print(
+            f"[NHÓM {group_number}] "
+            f"Hoàn thành. "
+            f"Thất bại: {len(failed_in_group)} địa điểm."
+        )
 
     # ========================================================
-    # 9. TỔNG HỢP VÀ KIỂM TRA
+    # 8. KIỂM TRA KẾT QUẢ TOÀN BỘ 63 ĐỊA ĐIỂM
     # ========================================================
 
     print("\n" + "=" * 60)
-
-    print("TỔNG KẾT THU THẬP")
-
+    print("TỔNG KẾT THU THẬP DỮ LIỆU")
     print("=" * 60)
 
-    if not all_data:
+    if not all_city_data:
 
         raise RuntimeError(
-            "Không thu thập được dữ liệu nào."
+            "Không thu thập được dữ liệu từ bất kỳ địa điểm nào."
         )
 
     final_df = pd.concat(
-        all_data,
+        all_city_data,
         ignore_index=True
     )
 
-    final_df = final_df.drop_duplicates(
-        subset=["city", "time"]
+    final_df["time"] = pd.to_datetime(
+        final_df["time"]
     )
-
-    final_df = final_df.sort_values(
-        ["city", "time"]
-    ).reset_index(drop=True)
-
-    final_df["time"] = pd.to_datetime(final_df["time"])
 
     final_df = final_df[
-       final_df["time"] <= cutoff_time
+        final_df["time"] <= cutoff_time
     ].copy()
 
-    final_df = final_df.drop_duplicates(
-       subset=["city", "time"]
+    final_df = (
+        final_df
+        .drop_duplicates(
+            subset=["city", "time"]
+        )
+        .sort_values(
+            ["city", "time"]
+        )
+        .reset_index(drop=True)
     )
 
-    final_df = final_df.sort_values(
-       ["city", "time"]
-    ).reset_index(drop=True)
-
-    actual_cities = set(
+    successful_cities = set(
         final_df["city"].unique()
     )
 
@@ -561,32 +651,44 @@ def fetch_all_cities():
         for info in CITIES_63.values()
     }
 
-    missing_cities = expected_cities - actual_cities
+    missing_cities = expected_cities - successful_cities
 
     print(
-        f"Số địa điểm thu thập được: "
-        f"{len(actual_cities)}/63"
+        f"Số địa điểm thu thập thành công: "
+        f"{len(successful_cities)}/63"
     )
 
     print(
-        f"Tổng số dòng: {len(final_df):,}"
+        f"Tổng số dòng dữ liệu: {len(final_df):,}"
     )
 
     if missing_cities:
 
-        print("\nCÁC ĐỊA ĐIỂM CÒN THIẾU:")
+        print("\nCác địa điểm chưa thu thập được:")
 
-        for city_name in sorted(missing_cities):
-            print(f"- {city_name}")
+        for city in sorted(missing_cities):
+            print(f"- {city}")
 
         raise RuntimeError(
-            f"Thiếu dữ liệu {len(missing_cities)} địa điểm. "
-            "Checkpoint của các nhóm thành công đã được lưu. "
-            "Hãy chạy lại workflow để tiếp tục."
+            f"Thu thập dữ liệu chưa hoàn tất: "
+            f"{len(missing_cities)} địa điểm bị thiếu. "
+            f"Không ghi đè dữ liệu đầu ra."
+        )
+
+    # Kiểm tra dữ liệu không bị thiếu cột
+    missing_columns = [
+        col for col in REQUIRED_COLUMNS
+        if col not in final_df.columns
+    ]
+
+    if missing_columns:
+
+        raise RuntimeError(
+            f"Dữ liệu cuối cùng thiếu cột: {missing_columns}"
         )
 
     # ========================================================
-    # 10. LƯU FILE CSV CHÍNH
+    # 9. LƯU FILE DỮ LIỆU CUỐI CÙNG
     # ========================================================
 
     DATA_DIR.mkdir(
@@ -594,31 +696,40 @@ def fetch_all_cities():
         exist_ok=True
     )
 
-    output_path = DATA_DIR / "latest_air_quality.csv"
+    output_file = DATA_DIR / "latest_air_quality.csv"
 
     final_df.to_csv(
-        output_path,
+        output_file,
         index=False,
         encoding="utf-8-sig"
     )
 
     print("\n" + "=" * 60)
-
     print("THU THẬP DỮ LIỆU THÀNH CÔNG!")
-
-    print(f"Tổng số dòng: {len(final_df):,}")
-    print(f"Số địa điểm: {len(actual_cities)}/63")
-    print(f"Đường dẫn: {output_path}")
-
     print("=" * 60)
 
-    return final_df
+    print(f"Số địa điểm: {len(successful_cities)}/63")
+    print(f"Tổng số dòng: {len(final_df):,}")
+    print(f"File đã lưu: {output_file}")
+    print(f"Checkpoint Run ID: {checkpoint_run_id}")
 
 
 # ============================================================
-# 11. CHẠY CHƯƠNG TRÌNH
+# 10. CHẠY CHƯƠNG TRÌNH
 # ============================================================
 
 if __name__ == "__main__":
 
-    fetch_all_cities()
+    try:
+
+        fetch_all_cities()
+
+    except Exception as error:
+
+        print("\n" + "=" * 60)
+        print("PIPELINE THU THẬP DỮ LIỆU THẤT BẠI")
+        print("=" * 60)
+
+        print(f"Lỗi: {error}")
+
+        raise
