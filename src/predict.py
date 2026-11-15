@@ -1,4 +1,3 @@
-
 import pandas as pd
 import numpy as np
 
@@ -24,6 +23,8 @@ INPUT_FILE = DATA_DIR / "prediction_features.csv"
 OUTPUT_FILE = DATA_DIR / "latest_predictions.csv"
 
 REMOTE_OUTPUT_FILE = "predictions/latest_predictions.csv"
+
+HISTORY_DIR = "predictions/history"
 
 RISK_LABELS = {
     0: "Thấp",
@@ -235,6 +236,61 @@ def upload_predictions():
     print("File:", REMOTE_OUTPUT_FILE)
 
 
+
+# ============================================================
+# 6B. LƯU LỊCH SỬ DỰ BÁO (để đối chiếu với thực tế sau này)
+# ============================================================
+
+def append_prediction_history(result):
+
+    print("\nĐang cập nhật lịch sử dự báo...")
+
+    api = HfApi(token=HF_TOKEN)
+
+    history = result.copy()
+    history["time"] = pd.to_datetime(history["time"])
+    history["predicted_at"] = pd.Timestamp.now(tz="UTC").strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    history["month"] = history["time"].dt.strftime("%Y-%m")
+
+    for month, new_df in history.groupby("month"):
+
+        remote_file = f"{HISTORY_DIR}/{month}.csv"
+        new_df = new_df.drop(columns=["month"])
+
+        if api.file_exists(
+            repo_id=DATASET_REPO_ID,
+            filename=remote_file,
+            repo_type="dataset"
+        ):
+            old_path = hf_hub_download(
+                repo_id=DATASET_REPO_ID,
+                filename=remote_file,
+                repo_type="dataset",
+                token=HF_TOKEN
+            )
+            old_df = pd.read_csv(old_path)
+            old_df["time"] = pd.to_datetime(old_df["time"])
+            new_df = pd.concat([old_df, new_df], ignore_index=True)
+
+        new_df = (
+            new_df.drop_duplicates(["city", "time"], keep="last")
+            .sort_values(["city", "time"])
+        )
+
+        api.upload_file(
+            path_or_fileobj=new_df.to_csv(
+                index=False, encoding="utf-8-sig"
+            ).encode("utf-8-sig"),
+            path_in_repo=remote_file,
+            repo_id=DATASET_REPO_ID,
+            repo_type="dataset",
+            commit_message=f"Append predictions {month}"
+        )
+
+        print(f"Đã cập nhật {remote_file} ({len(new_df):,} dòng)")
+
 # ============================================================
 # 7. CHƯƠNG TRÌNH CHÍNH
 # ============================================================
@@ -262,6 +318,9 @@ def main():
 
     # Upload kết quả
     upload_predictions()
+
+    # Lưu lịch sử để xác thực sau
+    append_prediction_history(result)
 
     # Hiển thị kết quả
     print("\n" + "=" * 60)
