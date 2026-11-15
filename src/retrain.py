@@ -81,6 +81,10 @@ RETRAIN_INTERVAL_HOURS = 360
 
 MAX_CLASS3_RECALL_DROP = 0.02
 
+# True  = candidate PHẢI thắng baseline persistence (Macro F1) mới được thay production
+# False = chỉ in cảnh báo và lưu kết quả, không chặn
+REQUIRE_BEAT_PERSISTENCE = False
+
 
 # ============================================================
 # 2. CHECK RETRAINING SCHEDULE
@@ -984,6 +988,44 @@ def evaluate_model(model, X_test, y_test):
     }
 
 
+def evaluate_persistence(test_df):
+    """
+    Baseline persistence: dự đoán mức rủi ro sau 3 giờ
+    bằng đúng mức rủi ro hiện tại (không học gì).
+    """
+
+    d = test_df.dropna(subset=["asthma_risk_level"])
+
+    y_true = d["target"].astype(int)
+    y_pred = d["asthma_risk_level"].astype(int)
+
+    return {
+        "n": int(len(d)),
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "macro_f1": float(f1_score(
+            y_true,
+            y_pred,
+            labels=[0, 1, 2, 3],
+            average="macro",
+            zero_division=0
+        )),
+        "weighted_f1": float(f1_score(
+            y_true,
+            y_pred,
+            labels=[0, 1, 2, 3],
+            average="weighted",
+            zero_division=0
+        )),
+        "class3_recall": float(recall_score(
+            y_true,
+            y_pred,
+            labels=[3],
+            average="macro",
+            zero_division=0
+        ))
+    }
+
+
 # ============================================================
 # 8. TRAIN AND COMPARE MODELS
 # ============================================================
@@ -1147,6 +1189,23 @@ def train_and_evaluate(
         y_test
     )
 
+    baseline_metrics = evaluate_persistence(test_df)
+
+    print("\n========== BASELINE PERSISTENCE ==========")
+    print("Số mẫu:", baseline_metrics["n"])
+    print(
+        "Persistence Accuracy:",
+        round(baseline_metrics["accuracy"], 4)
+    )
+    print(
+        "Persistence Macro F1:",
+        round(baseline_metrics["macro_f1"], 4)
+    )
+    print(
+        "Persistence Class 3 Recall:",
+        round(baseline_metrics["class3_recall"], 4)
+    )
+
     print("\n========== SO SÁNH TEST ==========")
 
     print(
@@ -1196,9 +1255,24 @@ def train_and_evaluate(
         )
     )
 
+    persistence_pass = (
+        candidate_metrics["macro_f1"]
+        > baseline_metrics["macro_f1"]
+    )
+
+    if not persistence_pass:
+        print(
+            "\nCẢNH BÁO: Candidate KHÔNG thắng "
+            "baseline persistence (Macro F1)."
+        )
+
     promote = (
         macro_f1_pass
         and class3_pass
+        and (
+            persistence_pass
+            or not REQUIRE_BEAT_PERSISTENCE
+        )
     )
 
     print("\n========== QUYẾT ĐỊNH ==========")
@@ -1217,6 +1291,7 @@ def train_and_evaluate(
         candidate,
         candidate_metrics,
         production_metrics,
+        baseline_metrics,
         promote,
         len(train_df),
         len(val_df),
@@ -1252,6 +1327,7 @@ def save_and_upload_results(
     candidate,
     candidate_metrics,
     production_metrics,
+    baseline_metrics,
     promote,
     train_rows,
     validation_rows,
@@ -1310,6 +1386,15 @@ def save_and_upload_results(
                 "weighted_f1": candidate_metrics["weighted_f1"],
                 "class3_recall": candidate_metrics["class3_recall"]
             },
+
+            "persistence_baseline": baseline_metrics,
+
+            "beats_persistence": bool(
+                candidate_metrics["macro_f1"]
+                > baseline_metrics["macro_f1"]
+            ),
+
+            "require_beat_persistence": REQUIRE_BEAT_PERSISTENCE,
 
             "feature_count": len(FEATURE_COLUMNS),
             "features": FEATURE_COLUMNS
@@ -1575,6 +1660,7 @@ def main():
         candidate,
         candidate_metrics,
         production_metrics,
+        baseline_metrics,
         promote,
         train_rows,
         validation_rows,
@@ -1590,6 +1676,7 @@ def main():
         candidate,
         candidate_metrics,
         production_metrics,
+        baseline_metrics,
         promote,
         train_rows,
         validation_rows,
@@ -1610,6 +1697,11 @@ def main():
     print(
         "Production Macro F1:",
         production_metrics["macro_f1"]
+    )
+
+    print(
+        "Persistence Macro F1:",
+        baseline_metrics["macro_f1"]
     )
 
     print("Promoted:", promote)
