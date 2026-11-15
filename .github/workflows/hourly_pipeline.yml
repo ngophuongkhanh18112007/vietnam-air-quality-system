@@ -1,22 +1,19 @@
-
-name: Hourly Air Quality Pipeline
+name: Verify Predictions
 
 on:
   schedule:
-    - cron: "17 * * * *"
-      timezone: "Asia/Ho_Chi_Minh"
-
+    - cron: "40 20 * * *"   # mỗi ngày (UTC)
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: air-quality-hourly-pipeline
+  group: air-quality-verify
   cancel-in-progress: false
 
 jobs:
-  run-pipeline:
+  verify:
     runs-on: ubuntu-latest
 
     env:
@@ -25,11 +22,9 @@ jobs:
       HF_MODEL_REPO: ${{ secrets.HF_MODEL_REPO }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
@@ -39,14 +34,5 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Fetch air quality data
-        run: python src/fetch_data.py
-
-      - name: Upload raw data to Hugging Face
-        run: python src/hf_storage.py
-
-      - name: Create prediction features
-        run: python src/feature_engineering.py
-
-      - name: Predict air quality risk
-        run: python src/predict.py
+      - name: Verify predictions against actual data
+        run: python src/verify_predictions.py --days 30
