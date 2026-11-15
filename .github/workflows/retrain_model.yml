@@ -14,7 +14,7 @@ on:
         type: boolean
 
       force:
-        description: "Bỏ qua chu kỳ 72 giờ nếu chọn Train"
+        description: "Bỏ qua chu kỳ 15 ngày nếu chọn Train"
         required: false
         default: false
         type: boolean
