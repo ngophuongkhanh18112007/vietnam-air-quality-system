@@ -77,7 +77,7 @@ RAW_COLUMNS = [
 LAST_RUN_FILE = "retraining/last_run.json"
 RUNS_DIR = "retraining/runs"
 
-RETRAIN_INTERVAL_HOURS = 72
+RETRAIN_INTERVAL_HOURS = 360
 
 MAX_CLASS3_RECALL_DROP = 0.02
 
@@ -89,7 +89,7 @@ MAX_CLASS3_RECALL_DROP = 0.02
 def should_retrain(force=False):
 
     if force:
-        print("Chạy thủ công: bỏ qua kiểm tra chu kỳ 72 giờ.")
+        print("Chạy thủ công: bỏ qua kiểm tra chu kỳ 15 ngày.")
         return True
 
     print("\nKiểm tra thời điểm retraining gần nhất...")
@@ -120,11 +120,11 @@ def should_retrain(force=False):
         print(f"Đã trôi qua: {elapsed_hours:.2f} giờ")
 
         if elapsed < timedelta(hours=RETRAIN_INTERVAL_HOURS):
-            print("Chưa đủ 72 giờ.")
+            print("Chưa đủ 15 ngày.")
             print("Bỏ qua lần chạy này.")
             return False
 
-        print("Đã đủ 72 giờ.")
+        print("Đã đủ 15 ngày.")
         print("Cho phép bắt đầu retraining.")
         return True
 
@@ -1522,7 +1522,7 @@ def main():
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Chạy ngay, bỏ qua chu kỳ 72 giờ."
+        help="Chạy ngay, bỏ qua chu kỳ 15 ngày."
     )
 
     parser.add_argument(
