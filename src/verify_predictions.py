@@ -10,6 +10,7 @@ Luồng:
 """
 
 import json
+import time
 import argparse
 from io import BytesIO
 
@@ -243,14 +244,25 @@ def daily_metrics(table):
 # 4. LƯU VÀ UPLOAD
 # ============================================================
 
-def upload_bytes(api, data, remote_path, message):
-    api.upload_file(
-        path_or_fileobj=BytesIO(data),
-        path_in_repo=remote_path,
-        repo_id=DATASET_REPO_ID,
-        repo_type="dataset",
-        commit_message=message,
-    )
+def upload_bytes(api, data, remote_path, message, max_retries=5):
+    # Hugging Face thỉnh thoảng trả lỗi 5xx tạm thời -> thử lại
+    for attempt in range(1, max_retries + 1):
+        try:
+            api.upload_file(
+                path_or_fileobj=BytesIO(data),
+                path_in_repo=remote_path,
+                repo_id=DATASET_REPO_ID,
+                repo_type="dataset",
+                commit_message=message,
+            )
+            return
+        except Exception as error:
+            if attempt == max_retries:
+                raise
+            wait = 10 * attempt
+            print(f"Upload {remote_path} lỗi lần {attempt}/{max_retries}: "
+                  f"{error}. Thử lại sau {wait} giây...")
+            time.sleep(wait)
 
 
 def print_summary(res):
