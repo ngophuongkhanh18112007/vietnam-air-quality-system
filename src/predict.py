@@ -249,6 +249,9 @@ def append_prediction_history(result):
 
     history = result.copy()
     history["time"] = pd.to_datetime(history["time"])
+    history["prediction_time"] = pd.to_datetime(
+        history["prediction_time"]
+    )
     history["predicted_at"] = pd.Timestamp.now(tz="UTC").strftime(
         "%Y-%m-%d %H:%M:%S"
     )
@@ -271,7 +274,12 @@ def append_prediction_history(result):
                 token=HF_TOKEN
             )
             old_df = pd.read_csv(old_path)
-            old_df["time"] = pd.to_datetime(old_df["time"])
+            old_df["time"] = pd.to_datetime(
+                old_df["time"], format="mixed"
+            )
+            old_df["prediction_time"] = pd.to_datetime(
+                old_df["prediction_time"], format="mixed"
+            )
             new_df = pd.concat([old_df, new_df], ignore_index=True)
 
         new_df = (
