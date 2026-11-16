@@ -1,353 +1,354 @@
-import pandas as pd
+"""
+Xác thực dự đoán: đối chiếu dự báo T+3 với dữ liệu thực tế khi đã có.
+
+Luồng:
+  1. Đọc lịch sử dự báo (predictions/history/*.csv) trên Hugging Face
+  2. Đọc dữ liệu thực tế (historical/*.csv) và tính lại nhãn rủi ro
+  3. Ghép theo (city, prediction_time) -> tính metric
+  4. So sánh với baseline persistence
+  5. Lưu và upload kết quả vào verification/
+"""
+
+import json
+import argparse
+from io import BytesIO
+
 import numpy as np
+import pandas as pd
 
-from catboost import CatBoostClassifier
 from huggingface_hub import HfApi, hf_hub_download
-
-from config import (
-    HF_TOKEN,
-    DATASET_REPO_ID,
-    MODEL_REPO_ID,
-    MODEL_FILENAME,
-    DATA_DIR,
-    FEATURE_COLUMNS
+from sklearn.metrics import (
+    accuracy_score,
+    cohen_kappa_score,
+    confusion_matrix,
+    f1_score,
+    precision_recall_fscore_support,
 )
 
+from config import HF_TOKEN, DATASET_REPO_ID, DATA_DIR
+from retrain import create_risk_labels
 
-# ============================================================
-# 1. CẤU HÌNH
-# ============================================================
-
-INPUT_FILE = DATA_DIR / "prediction_features.csv"
-
-OUTPUT_FILE = DATA_DIR / "latest_predictions.csv"
-
-REMOTE_OUTPUT_FILE = "predictions/latest_predictions.csv"
-
-HISTORY_DIR = "predictions/history"
-
-RISK_LABELS = {
-    0: "Thấp",
-    1: "Trung bình",
-    2: "Cao",
-    3: "Rất cao"
-}
+LABELS = [0, 1, 2, 3]
+HISTORY_PREFIX = "predictions/history/"
+HISTORICAL_DIR = "historical"
+REMOTE_DIR = "verification"
+POLLUTANTS = ["pm2_5", "pm10", "carbon_monoxide", "nitrogen_dioxide"]
 
 
 # ============================================================
-# 2. TẢI MÔ HÌNH CATBOOST
+# 1. ĐỌC DỮ LIỆU
 # ============================================================
 
-def load_model():
-
-    print("Đang tải mô hình từ Hugging Face...")
-
-    # Kiểm tra cấu hình, tuyệt đối không in HF_TOKEN
-    print("\nKIỂM TRA CẤU HÌNH:")
-    print("MODEL_REPO_ID:", MODEL_REPO_ID)
-    print("MODEL_FILENAME:", MODEL_FILENAME)
-    print("HF_TOKEN tồn tại:", bool(HF_TOKEN))
-
-    if not MODEL_REPO_ID:
-        raise ValueError("MODEL_REPO_ID đang bị trống!")
-
-    if not MODEL_FILENAME:
-        raise ValueError("MODEL_FILENAME đang bị trống!")
-
-    if not HF_TOKEN:
-        raise ValueError("HF_TOKEN chưa được cấu hình!")
-
-    print("\nĐang kết nối Model Repository...")
-
-    model_path = hf_hub_download(
-        repo_id=MODEL_REPO_ID,
-        filename=MODEL_FILENAME,
-        repo_type="model",
-        token=HF_TOKEN
-    )
-
-    print("Tải file mô hình thành công!")
-    print("Đường dẫn file mô hình:", model_path)
-
-    model = CatBoostClassifier()
-
-    model.load_model(model_path)
-
-    print("Đã load mô hình CatBoost!")
-
-    # Kiểm tra số lượng features
-    if len(model.feature_names_) != 33:
-        raise ValueError(
-            f"Mô hình yêu cầu {len(model.feature_names_)} features, "
-            "không phải 33!"
-        )
-
-    # Kiểm tra thứ tự features
-    if list(model.feature_names_) != FEATURE_COLUMNS:
-        raise ValueError(
-            "Thứ tự features không khớp với mô hình CatBoost!"
-        )
-
-    # Kiểm tra các lớp dự báo
-    if list(model.classes_) != [0, 1, 2, 3]:
-        raise ValueError(
-            f"Các lớp của mô hình không hợp lệ: {model.classes_}"
-        )
-
-    print("\nKiểm tra mô hình thành công!")
-    print("Số features:", len(model.feature_names_))
-    print("Các lớp:", model.classes_)
-
-    return model
-
-
-# ============================================================
-# 3. ĐỌC DỮ LIỆU ĐẦU VÀO
-# ============================================================
-
-def load_prediction_data():
-
-    if not INPUT_FILE.exists():
-        raise FileNotFoundError(
-            f"Không tìm thấy file: {INPUT_FILE}"
-        )
-
-    df = pd.read_csv(INPUT_FILE)
-
-    required_columns = [
-        "time",
-        "prediction_time"
-    ] + FEATURE_COLUMNS
-
-    missing = [
-        col for col in required_columns
-        if col not in df.columns
+def load_prediction_history(api):
+    files = [
+        f for f in api.list_repo_files(DATASET_REPO_ID, repo_type="dataset")
+        if f.startswith(HISTORY_PREFIX) and f.endswith(".csv")
     ]
 
-    if missing:
-        raise ValueError(
-            f"Dữ liệu thiếu các cột: {missing}"
+    if not files:
+        raise FileNotFoundError(
+            "Chưa có lịch sử dự báo. Hãy chạy predict.py (bản đã cập nhật) "
+            "ít nhất vài giờ trước khi xác thực."
         )
 
-    if len(df) != 63:
-        raise ValueError(
-            f"Cần 63 dòng dự báo nhưng nhận được {len(df)} dòng!"
+    frames = []
+    for f in sorted(files):
+        path = hf_hub_download(
+            repo_id=DATASET_REPO_ID, filename=f,
+            repo_type="dataset", token=HF_TOKEN,
         )
+        frames.append(pd.read_csv(path))
 
-    if df["city"].nunique() != 63:
-        raise ValueError(
-            "Dữ liệu không có đủ 63 địa điểm riêng biệt!"
+    df = pd.concat(frames, ignore_index=True)
+    df["time"] = pd.to_datetime(df["time"], format="mixed")
+    df["prediction_time"] = pd.to_datetime(
+        df["prediction_time"], format="mixed"
+    )
+    df = df.drop_duplicates(["city", "time"], keep="last")
+    return df
+
+
+def load_actual_data(api, start, end):
+    # Lùi 2 ngày để đủ cửa sổ 24h tính nhãn ở đầu kỳ
+    months = pd.period_range(
+        start - pd.Timedelta(days=2), end, freq="M"
+    ).strftime("%Y-%m")
+
+    frames = []
+    for month in months:
+        remote = f"{HISTORICAL_DIR}/{month}.csv"
+        if not api.file_exists(
+            repo_id=DATASET_REPO_ID, filename=remote, repo_type="dataset"
+        ):
+            continue
+        path = hf_hub_download(
+            repo_id=DATASET_REPO_ID, filename=remote,
+            repo_type="dataset", token=HF_TOKEN,
         )
+        frames.append(pd.read_csv(path))
 
-    df["city"] = df["city"].astype(str)
-    df["region"] = df["region"].astype(str)
+    if not frames:
+        raise FileNotFoundError("Không có dữ liệu thực tế trong kỳ xác thực.")
 
-    if df[FEATURE_COLUMNS].isna().any().any():
-        raise ValueError(
-            "Dữ liệu đầu vào còn giá trị thiếu!"
-        )
-
-    print("\nĐọc dữ liệu thành công!")
-    print("Số dòng:", len(df))
-    print("Số địa điểm:", df["city"].nunique())
-
+    df = pd.concat(frames, ignore_index=True)
+    df["time"] = pd.to_datetime(df["time"], errors="coerce")
+    for col in POLLUTANTS:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = (
+        df.dropna(subset=["time", "city"])
+        .drop_duplicates(["city", "time"], keep="last")
+        .sort_values(["city", "time"])
+        .reset_index(drop=True)
+    )
     return df
 
 
 # ============================================================
-# 4. THỰC HIỆN DỰ BÁO
+# 2. GHÉP DỰ BÁO VỚI THỰC TẾ
 # ============================================================
 
-def predict_air_quality(model, df):
+def build_verification_table(preds, actual_df):
+    labeled = create_risk_labels(actual_df)[
+        ["city", "time", "asthma_risk_level"]
+    ].dropna()
 
-    print("\nĐang thực hiện dự báo...")
+    actual = labeled.rename(columns={
+        "time": "prediction_time",
+        "asthma_risk_level": "actual_risk_level",
+    })
+    current = labeled.rename(columns={
+        "asthma_risk_level": "current_risk_level",
+    })
 
-    X = df[FEATURE_COLUMNS].copy()
-
-    # Dự báo nhãn
-    predictions = model.predict(X)
-
-    predictions = np.asarray(
-        predictions
-    ).reshape(-1).astype(int)
-
-    # Xác suất của từng lớp
-    probabilities = model.predict_proba(X)
-
-    # Tạo bảng kết quả
-    result = df[
-        ["city", "region", "time", "prediction_time"]
-    ].copy()
-
-    result["predicted_risk_level"] = predictions
-
-    result["predicted_risk_name"] = [
-        RISK_LABELS[value]
-        for value in predictions
-    ]
-
-    # Thêm xác suất dự báo
-    for index, risk_level in enumerate(model.classes_):
-
-        result[
-            f"probability_level_{risk_level}"
-        ] = probabilities[:, index]
-
-    print("Dự báo thành công!")
-
-    return result
-
-
-# ============================================================
-# 5. LƯU KẾT QUẢ DỰ BÁO
-# ============================================================
-
-def save_predictions(result):
-
-    result.to_csv(
-        OUTPUT_FILE,
-        index=False,
-        encoding="utf-8-sig"
+    merged = preds.merge(
+        actual, on=["city", "prediction_time"], how="inner"
+    ).merge(
+        current, on=["city", "time"], how="left"
     )
 
-    print("\nĐã lưu kết quả tại:")
-    print(OUTPUT_FILE)
+    merged["actual_risk_level"] = merged["actual_risk_level"].astype(int)
+    merged["predicted_risk_level"] = merged["predicted_risk_level"].astype(int)
+    return merged
 
 
 # ============================================================
-# 6. UPLOAD KẾT QUẢ LÊN HUGGING FACE
+# 3. TÍNH METRIC
 # ============================================================
 
-def upload_predictions():
+def compute_metrics(y_true, y_pred):
+    y_true = np.asarray(y_true, dtype=int)
+    y_pred = np.asarray(y_pred, dtype=int)
 
-    print("\nĐang upload kết quả dự báo...")
+    p, r, f, s = precision_recall_fscore_support(
+        y_true, y_pred, labels=LABELS, zero_division=0
+    )
 
-    api = HfApi(token=HF_TOKEN)
+    try:
+        qwk = float(cohen_kappa_score(
+            y_true, y_pred, labels=LABELS, weights="quadratic"
+        ))
+        if np.isnan(qwk):
+            qwk = None
+    except Exception:
+        qwk = None
 
+    high = y_true >= 2
+    miss_high = (
+        float((y_pred[high] <= 1).mean()) if high.any() else None
+    )
+
+    return {
+        "n": int(len(y_true)),
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "macro_f1": float(f1_score(
+            y_true, y_pred, labels=LABELS, average="macro", zero_division=0
+        )),
+        "weighted_f1": float(f1_score(
+            y_true, y_pred, labels=LABELS, average="weighted", zero_division=0
+        )),
+        "within_1_accuracy": float((np.abs(y_true - y_pred) <= 1).mean()),
+        "quadratic_weighted_kappa": qwk,
+        # Tỷ lệ bỏ sót: thực tế mức Cao/Rất cao nhưng dự báo Thấp/Trung bình
+        "high_risk_miss_rate": miss_high,
+        "per_class": {
+            str(l): {
+                "precision": float(p[i]),
+                "recall": float(r[i]),
+                "f1": float(f[i]),
+                "support": int(s[i]),
+            }
+            for i, l in enumerate(LABELS)
+        },
+        "confusion_matrix": confusion_matrix(
+            y_true, y_pred, labels=LABELS
+        ).tolist(),
+    }
+
+
+def compute_all(table):
+    model = compute_metrics(
+        table["actual_risk_level"], table["predicted_risk_level"]
+    )
+
+    base_df = table.dropna(subset=["current_risk_level"])
+    baseline = None
+    if len(base_df):
+        baseline = compute_metrics(
+            base_df["actual_risk_level"], base_df["current_risk_level"]
+        )
+
+    # Các mẫu mức rủi ro THỰC SỰ thay đổi sau 3 giờ
+    # (persistence luôn sai ở đây, mô hình mới thể hiện giá trị)
+    changed = None
+    if len(base_df):
+        mask = base_df["actual_risk_level"] != base_df["current_risk_level"]
+        if mask.any():
+            sub = base_df[mask]
+            changed = {
+                "n_changed": int(mask.sum()),
+                "changed_rate": float(mask.mean()),
+                "model_accuracy_on_changed": float(
+                    (sub["actual_risk_level"]
+                     == sub["predicted_risk_level"]).mean()
+                ),
+            }
+
+    return {
+        "model": model,
+        "persistence_baseline": baseline,
+        "changed_samples": changed,
+    }
+
+
+def daily_metrics(table):
+    d = table.copy()
+    d["date"] = d["prediction_time"].dt.date
+    rows = []
+    for date, g in d.groupby("date"):
+        rows.append({
+            "date": str(date),
+            "n": len(g),
+            "accuracy": float(
+                (g["actual_risk_level"] == g["predicted_risk_level"]).mean()
+            ),
+            "macro_f1": float(f1_score(
+                g["actual_risk_level"], g["predicted_risk_level"],
+                labels=LABELS, average="macro", zero_division=0
+            )),
+        })
+    return pd.DataFrame(rows)
+
+
+# ============================================================
+# 4. LƯU VÀ UPLOAD
+# ============================================================
+
+def upload_bytes(api, data, remote_path, message):
     api.upload_file(
-        path_or_fileobj=str(OUTPUT_FILE),
-        path_in_repo=REMOTE_OUTPUT_FILE,
+        path_or_fileobj=BytesIO(data),
+        path_in_repo=remote_path,
         repo_id=DATASET_REPO_ID,
         repo_type="dataset",
-        commit_message="Update air quality predictions"
+        commit_message=message,
     )
 
-    print("Upload kết quả dự báo thành công!")
-    print("File:", REMOTE_OUTPUT_FILE)
 
+def print_summary(res):
+    m, b, c = res["model"], res["persistence_baseline"], res["changed_samples"]
+
+    print("\n" + "=" * 60)
+    print("KẾT QUẢ XÁC THỰC DỰ BÁO T+3")
+    print("=" * 60)
+    print(f"Số dự báo đã xác thực: {m['n']:,}")
+    print(f"{'':22}{'Model':>10}{'Persistence':>14}")
+    for key in ["accuracy", "macro_f1", "within_1_accuracy"]:
+        bv = f"{b[key]:.4f}" if b else "n/a"
+        print(f"{key:22}{m[key]:>10.4f}{bv:>14}")
+    if m["high_risk_miss_rate"] is not None:
+        bv = (f"{b['high_risk_miss_rate']:.4f}"
+              if b and b["high_risk_miss_rate"] is not None else "n/a")
+        print(f"{'high_risk_miss_rate':22}"
+              f"{m['high_risk_miss_rate']:>10.4f}{bv:>14}")
+    if c:
+        print(f"\nTỷ lệ mẫu đổi mức sau 3h: {c['changed_rate']:.2%} "
+              f"({c['n_changed']:,} mẫu)")
+        print(f"Model đoán đúng trên các mẫu đổi mức: "
+              f"{c['model_accuracy_on_changed']:.2%} (persistence = 0%)")
+    print("\nMa trận nhầm lẫn (hàng = thực tế, cột = dự báo):")
+    print(pd.DataFrame(
+        m["confusion_matrix"], index=LABELS, columns=LABELS
+    ))
 
 
 # ============================================================
-# 6B. LƯU LỊCH SỬ DỰ BÁO (để đối chiếu với thực tế sau này)
-# ============================================================
-
-def append_prediction_history(result):
-
-    print("\nĐang cập nhật lịch sử dự báo...")
-
-    api = HfApi(token=HF_TOKEN)
-
-    history = result.copy()
-    history["time"] = pd.to_datetime(history["time"])
-    history["prediction_time"] = pd.to_datetime(
-        history["prediction_time"]
-    )
-    history["predicted_at"] = pd.Timestamp.now(tz="UTC").strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
-    history["month"] = history["time"].dt.strftime("%Y-%m")
-
-    for month, new_df in history.groupby("month"):
-
-        remote_file = f"{HISTORY_DIR}/{month}.csv"
-        new_df = new_df.drop(columns=["month"])
-
-        if api.file_exists(
-            repo_id=DATASET_REPO_ID,
-            filename=remote_file,
-            repo_type="dataset"
-        ):
-            old_path = hf_hub_download(
-                repo_id=DATASET_REPO_ID,
-                filename=remote_file,
-                repo_type="dataset",
-                token=HF_TOKEN
-            )
-            old_df = pd.read_csv(old_path)
-            old_df["time"] = pd.to_datetime(
-                old_df["time"], format="mixed"
-            )
-            old_df["prediction_time"] = pd.to_datetime(
-                old_df["prediction_time"], format="mixed"
-            )
-            new_df = pd.concat([old_df, new_df], ignore_index=True)
-
-        new_df = (
-            new_df.drop_duplicates(["city", "time"], keep="last")
-            .sort_values(["city", "time"])
-        )
-
-        api.upload_file(
-            path_or_fileobj=new_df.to_csv(
-                index=False, encoding="utf-8-sig"
-            ).encode("utf-8-sig"),
-            path_in_repo=remote_file,
-            repo_id=DATASET_REPO_ID,
-            repo_type="dataset",
-            commit_message=f"Append predictions {month}"
-        )
-
-        print(f"Đã cập nhật {remote_file} ({len(new_df):,} dòng)")
-
-# ============================================================
-# 7. CHƯƠNG TRÌNH CHÍNH
+# 5. CHƯƠNG TRÌNH CHÍNH
 # ============================================================
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--days", type=int, default=30,
+                        help="Chỉ xác thực các dự báo trong N ngày gần nhất")
+    parser.add_argument("--no-upload", action="store_true")
+    args = parser.parse_args()
 
-    print("=" * 60)
-    print("VIETNAM AIR QUALITY PREDICTION")
-    print("=" * 60)
+    api = HfApi(token=HF_TOKEN)
 
-    # Tải mô hình
-    model = load_model()
+    preds = load_prediction_history(api)
+    cutoff = preds["time"].max() - pd.Timedelta(days=args.days)
+    preds = preds[preds["time"] >= cutoff]
+    print(f"Số dự báo trong {args.days} ngày: {len(preds):,}")
 
-    # Đọc features
-    df = load_prediction_data()
-
-    # Dự báo
-    result = predict_air_quality(
-        model,
-        df
+    actual_df = load_actual_data(
+        api, preds["time"].min(), preds["prediction_time"].max()
     )
 
-    # Lưu kết quả
-    save_predictions(result)
+    table = build_verification_table(preds, actual_df)
+    pending = len(preds) - len(table)
+    print(f"Đã có thực tế: {len(table):,} | Chưa đến hạn/thiếu: {pending:,}")
 
-    # Upload kết quả
-    upload_predictions()
+    if table.empty:
+        print("Chưa có dự báo nào đến hạn xác thực.")
+        return
 
-    # Lưu lịch sử để xác thực sau
-    append_prediction_history(result)
+    res = compute_all(table)
+    res["pending_predictions"] = int(pending)
+    res["period"] = {
+        "from": str(table["prediction_time"].min()),
+        "to": str(table["prediction_time"].max()),
+    }
 
-    # Hiển thị kết quả
-    print("\n" + "=" * 60)
-    print("KẾT QUẢ DỰ BÁO 63 ĐỊA ĐIỂM")
-    print("=" * 60)
+    print_summary(res)
 
-    print(
-        result[
-            [
-                "city",
-                "region",
-                "prediction_time",
-                "predicted_risk_level",
-                "predicted_risk_name"
-            ]
-        ].to_string(index=False)
-    )
+    out_dir = DATA_DIR / "verification"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    print("\nHOÀN THÀNH DỰ BÁO!")
+    metrics_bytes = json.dumps(res, ensure_ascii=False, indent=2).encode("utf-8")
+    cm_bytes = pd.DataFrame(
+        res["model"]["confusion_matrix"],
+        index=[f"actual_{l}" for l in LABELS],
+        columns=[f"pred_{l}" for l in LABELS],
+    ).to_csv().encode("utf-8-sig")
+    daily_bytes = daily_metrics(table).to_csv(index=False).encode("utf-8-sig")
+    detail_bytes = table.to_csv(index=False).encode("utf-8-sig")
+
+    (out_dir / "metrics.json").write_bytes(metrics_bytes)
+    (out_dir / "confusion_matrix.csv").write_bytes(cm_bytes)
+    (out_dir / "daily_metrics.csv").write_bytes(daily_bytes)
+    (out_dir / "verified_predictions.csv").write_bytes(detail_bytes)
+    print(f"\nĐã lưu kết quả tại: {out_dir}")
+
+    if args.no_upload:
+        return
+
+    msg = "Update prediction verification"
+    for name, data in [
+        ("metrics.json", metrics_bytes),
+        ("confusion_matrix.csv", cm_bytes),
+        ("daily_metrics.csv", daily_bytes),
+        ("verified_predictions.csv", detail_bytes),
+    ]:
+        upload_bytes(api, data, f"{REMOTE_DIR}/{name}", msg)
+    print("Upload kết quả xác thực thành công!")
 
 
 if __name__ == "__main__":
